@@ -1,0 +1,3 @@
+[submodule "engine/dds"]
+	path = engine/dds
+	url = https://github.com/dds-bridge/dds

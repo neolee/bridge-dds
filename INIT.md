@@ -21,15 +21,15 @@ A tool for bridge enthusiasts to determine the optimal contract and line of play
 
 ## Engine
 
-We use Bo Haglund's [dds](https://github.com/dds-bridge/dds) C library under the hood. It provides `SolveBoard` and related functions that handle double-dummy solving from any position (fresh deal or mid-hand). This library has been battle-tested for decades and is used by BBO and Bridge Solver Online. The license is MIT.
+We use Bo Haglund's [dds](https://github.com/dds-bridge/dds) C library (v2.9.0, Apache 2.0). It provides `CalcDDtablePBN` for full-deal solving, `DealerPar` for par calculation, and `SolveBoardPBN` for mid-hand analysis. All DDS communication uses PBN string format (`dealPBN` / `ddTableDealPBN`), avoiding the binary `deal.remainCards` format entirely. The library has been battle-tested for decades and is used by BBO and Bridge Solver Online.
 
-We will **not** rewrite the DDS engine. We bind to the C library via Rust FFI.
+We will **not** rewrite the DDS engine. We bind to the C library via hand-written Rust FFI (no `bindgen`).
 
 ## Architecture
 
 - **Single language:** Rust for both CLI and Web Server.
 - **Single crate, two binary targets:** `bridge` (CLI) and `bridge-server` (Web API + embedded front-end). Both consume a shared `lib.rs` that exposes the core domain logic.
-- **Core library (`lib.rs`)** contains: `FFI` bindings to `dds`, safe Rust wrappers around `SolveBoard`, PBN parsing/writing, Play Trace parsing, tricks matrix computation, and Par calculation.
+- **Core library (`lib.rs`)** contains: hand-written FFI bindings to `dds` (verified against `dll.h`), safe Rust wrappers around `CalcDDtablePBN` / `DealerPar` / `SolveBoardPBN`, PBN parsing/writing, Play Trace parsing, tricks matrix computation, and Par result type.
 - **CLI** accepts PBN or JSON on `stdin` (or as a positional argument), produces a tricks matrix and Par result on stdout. `--format json` for machine consumption; default is a human-readable table.
 - **Web Server** wraps the same library functions in REST endpoints (`POST /api/solve`, `POST /api/analyze`). The React SPA front-end is embedded in the server binary via `rust-embed` so that deployment requires only a single file.
 
@@ -55,19 +55,20 @@ No Docker, no Python runtime, no `node_modules`. The React static build is compi
 
 | Dependency | Role |
 |---|---|
-| `dds` (C library) | Double-dummy solving engine |
+| `dds` (C library) | Double-dummy solving and par calculation engine |
 | `clap` | CLI argument parsing |
 | `serde` / `serde_json` | JSON serialization |
-| `axum` | HTTP server |
-| `rust-embed` | Embed static front-end assets |
-| `bindgen` | Generate Rust FFI bindings for `dds.h` |
-| React + Vite | Frontend UI |
+| `axum` | HTTP server (Phase 2) |
+| `rust-embed` | Embed static front-end assets (Phase 2) |
+| React + Vite | Frontend UI (Phase 3) |
+
+DDS is compiled separately via its own platform Makefile (e.g. `Makefile_Mac_clang_static`). The project root `Makefile` orchestrates DDS compilation before `cargo build`.
 
 ## Input / Output Formats
 
 - **PBN** is the canonical interchange format, both for import and export.
 - **Play Trace** follows the PBN play record specification.
-- Internally, hands are represented as 52-bit masks (matching the DDS library convention).
+- Internally, hands are represented as 52-bit masks (a Rust `Hand` newtype wrapping `u64`). This bit layout is our own convention; it is not aligned with DDS's binary `remainCards` format, which is never used directly. All DDS communication uses PBN strings.
 
 ## Design Decisions
 
