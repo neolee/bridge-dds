@@ -1,91 +1,94 @@
-# Vision & Architecture
+# Vision And Architecture
 
 ## Purpose
 
-A tool for bridge enthusiasts to determine the optimal contract and line of play for a given deal under double-dummy conditions. The core solves the question: *given all four hands are known, what is the best result both sides can achieve with perfect play and perfect defense?*
+`bridge-dds` helps bridge players analyze a board under `double-dummy` conditions. Given all four hands, the tool answers what each declarer can make in each strain, what the par result is, and later what the optimal continuation is after a partial play trace.
 
 ## Scope
 
-### Core features
+### Core Features
 
-1. **Double-dummy solving.** Given a deal, output the maximum number of tricks each declarer can win in each strain (`S`, `H`, `D`, `C`, `NT`). This yields a 20-entry tricks matrix (5 strains x 4 declarers, though NS and EW positions are symmetric).
-2. **Par calculation.** From the 20 tricks results, compute the theoretical par contract and score, accounting for vulnerability, doubles, and game/slam bonuses.
-3. **Mid-hand analysis.** Given a partial play trace (the first `k` tricks already played), compute the remaining optimal line of play from the current position. This includes validating the legality of the play trace and deriving the residual state.
-4. **Batch analysis.** Process multiple deals from a `PBN` file and produce aggregate statistics.
+1. `Double-dummy` solving. Given a `PBN` record, output the maximum number of tricks for every declarer and strain. The primary result is a `4x5` matrix: declarers `N`, `E`, `S`, `W` by strains `S`, `H`, `D`, `C`, `NT`.
+2. `Par` calculation. From the `20` double-dummy results, compute the theoretical par contract and score using `DDS` `DealerPar`, including vulnerability, doubles, game bonuses, slam bonuses, and sacrifices.
+3. `Mid-hand` analysis. Given a `PBN` play trace, evaluate the play and compute the optimal continuation from the current position.
+4. `Batch` analysis. Process multiple boards from a `PBN` file and produce aggregate statistics.
 
-### Non-features (deliberate exclusions)
+### Non-Features
 
-- Bidding system comparison.
-- Interactive TUI; all CLI output is plain text, suitable for piping.
-- Online multiplayer or user accounts.
+- No bidding-system comparison.
+- No interactive `TUI`; all `CLI` output is plain text and suitable for piping.
+- No online multiplayer or user accounts.
 
 ## Engine
 
-We use Bo Haglund's [dds](https://github.com/dds-bridge/dds) C library (v2.9.0, Apache 2.0). It provides `CalcDDtablePBN` for full-deal solving, `DealerPar` for par calculation, and `SolveBoardPBN` for mid-hand analysis. All DDS communication uses PBN string format (`dealPBN` / `ddTableDealPBN`), avoiding the binary `deal.remainCards` format entirely. The library has been battle-tested for decades and is used by BBO and Bridge Solver Online.
+The project uses Bo Haglund's `DDS` `C` library, version `2.9.0`, licensed under `Apache-2.0`. The `Phase 1` functions are `CalcDDtablePBN`, `DealerPar`, `SetMaxThreads`, and `ErrorMessage`. `Phase 1b` may additionally use `AnalysePlayPBN` for play-trace evaluation and `SolveBoardPBN` for continuation analysis.
 
-We will **not** rewrite the DDS engine. We bind to the C library via hand-written Rust FFI (no `bindgen`).
+The project does not rewrite the `DDS` engine. It binds to the small required `C` API through hand-written `Rust` `FFI`, verified against `engine/dds/include/dll.h`. All solver inputs use `PBN` string formats such as `ddTableDealPBN` and `dealPBN`; the project does not use the binary `deal.remainCards` interface.
+
+## Input Model
+
+`PBN` is the canonical input format. The `CLI` accepts a complete or minimal `PBN` record, not separate command-line options for fields already present in `PBN`.
+
+For `Phase 1a`, a valid input record must include:
+
+- `Deal`: the card layout in `PBN` deal-tag format.
+- `Dealer`: the dealer direction, used as the `dealer` argument to `DealerPar`.
+- `Vulnerable`: the vulnerability, mapped to the `DDS` vulnerability encoding.
+
+The `Deal` tag's `<first>` direction is only the first hand listed in the deal string. In `PBN` import format it is not necessarily the dealer. The implementation must not infer `Dealer` from `Deal`.
 
 ## Architecture
 
-- **Single language:** Rust for both CLI and Web Server.
-- **Single crate, two binary targets:** `bridge` (CLI) and `bridge-server` (Web API + embedded front-end). Both consume a shared `lib.rs` that exposes the core domain logic.
-- **Core library (`lib.rs`)** contains: hand-written FFI bindings to `dds` (verified against `dll.h`), safe Rust wrappers around `CalcDDtablePBN` / `DealerPar` / `SolveBoardPBN`, PBN parsing/writing, Play Trace parsing, tricks matrix computation, and Par result type.
-- **CLI** accepts PBN or JSON on `stdin` (or as a positional argument), produces a tricks matrix and Par result on stdout. `--format json` for machine consumption; default is a human-readable table.
-- **Web Server** wraps the same library functions in REST endpoints (`POST /api/solve`, `POST /api/analyze`). The React SPA front-end is embedded in the server binary via `rust-embed` so that deployment requires only a single file.
+- `Rust` is used for the `CLI`, shared library, and later `Web` server.
+- A single crate exposes shared domain logic from `src/lib.rs`.
+- The `bridge` binary is the `CLI`.
+- The later `bridge-server` binary will expose the same operations through `REST` endpoints.
+- `DDS` build output is copied to `engine/dds/lib/libdds.a`, and `build.rs` links against that stable path.
+
+The core library contains:
+
+- Hand-written `FFI` bindings for `DDS`.
+- Safe wrappers around `CalcDDtablePBN`, `DealerPar`, `AnalysePlayPBN`, and `SolveBoardPBN`.
+- `PBN` record parsing for `Deal`, `Dealer`, `Vulnerable`, and later `Play`.
+- Domain types for cards, hands, directions, strains, trick tables, and par results.
+- Text and `JSON` response types shared by the `CLI` and later `REST` API where practical.
 
 ## Distribution
 
-Both binaries compile to standalone executables with zero runtime dependencies. Deployment is:
+Both binaries should compile to standalone executables with no required runtime service. The `React` build for the later `Web` UI will be embedded into `bridge-server` via `rust-embed`.
 
-```
-scp bridge bridge-server user@host:~
-ssh user@host './bridge-server &'
-```
+## `CLI` Design Principles
 
-No Docker, no Python runtime, no `node_modules`. The React static build is compiled into the server binary.
+- `PBN` in, text or `JSON` out.
+- No interactive prompts.
+- The default output is readable plain text.
+- `--format json` provides machine-readable output.
+- The `CLI` is a thin wrapper around the shared library.
 
-## CLI Design Principles
+## Dependencies
 
-- Text in, text out. No TUI, no interactive prompts.
-- Default output is human-readable and well-formatted.
-- `--format json` provides machine-parseable output for scripting or the Web front-end.
-- The CLI is a thin wrapper around the core library — it is an API client that happens to run in the terminal.
-
-## Key External Dependencies
-
-| Dependency | Role |
-|---|---|
-| `dds` (C library) | Double-dummy solving and par calculation engine |
-| `clap` | CLI argument parsing |
-| `serde` / `serde_json` | JSON serialization |
-| `axum` | HTTP server (Phase 2) |
-| `rust-embed` | Embed static front-end assets (Phase 2) |
-| React + Vite | Frontend UI (Phase 3) |
-
-DDS is compiled separately via its own platform Makefile (e.g. `Makefile_Mac_clang_static`). The project root `Makefile` orchestrates DDS compilation before `cargo build`.
-
-## Input / Output Formats
-
-- **PBN** is the canonical interchange format, both for import and export.
-- **Play Trace** follows the PBN play record specification.
-- Internally, hands are represented as 52-bit masks (a Rust `Hand` newtype wrapping `u64`). This bit layout is our own convention; it is not aligned with DDS's binary `remainCards` format, which is never used directly. All DDS communication uses PBN strings.
+- `dds`: `C` double-dummy solver and par engine.
+- `clap`: `CLI` argument parsing.
+- `serde` and `serde_json`: structured output.
+- `thiserror`: library error types.
+- `axum`: later `REST` server.
+- `rust-embed`: later static frontend embedding.
+- `React` and `Vite`: later frontend UI.
 
 ## Design Decisions
 
-### DDS `SolveBoard` return-value semantics
+### `PBN` Tags
 
-The exact semantics (remaining tricks vs. total tricks including already-won) will be determined by reading the DDS source code and documentation once the library is cloned into `engine/`. No guesswork; a unit test will pin the observed behavior.
+The project treats `Dealer` and `Vulnerable` as standard `PBN` data. The `CLI` should not add `--dealer` or `--vul` options unless a later compatibility mode explicitly needs them.
 
-### Frontend serving: dev vs. production
+### `DDS` `SolveBoardPBN` Semantics
 
-- **Development / testing:** The server proxies unmatched routes to the Vite dev server (`localhost:5173`), giving the front-end hot-module replacement during development.
-- **Production:** The React build output is embedded into the server binary via `rust-embed`.
-- The switch is driven by `#[cfg(debug_assertions)]` — debug builds proxy, release builds embed.
+The exact result semantics for `SolveBoardPBN` in continuation analysis must be pinned by tests before `Phase 1b` is considered complete.
 
-### Play-trace validation
+### Play-Trace Analysis
 
-User-supplied play traces validation is designed as a standalone, swappable module. For v1.0:
+`AnalysePlayPBN` is the preferred interface for evaluating a supplied play trace because it returns values before and after played cards. `SolveBoardPBN` remains the interface for asking what to play from the derived current position.
 
-- **Hard errors:** Card not held by the claimed player; same card played twice.
-- **Warnings / best-effort:** Follow-suit violations and trick-winner miscalculations produce a warning but do not block analysis.
-- The module boundary allows swapping in a stricter rule engine later without touching the solver.
+### Frontend Serving
+
+During development, `bridge-server` may proxy unmatched routes to the `Vite` dev server. In release builds, the `React` output is embedded with `rust-embed`.
