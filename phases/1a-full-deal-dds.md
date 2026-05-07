@@ -9,6 +9,7 @@ Build a `CLI` tool that accepts a `PBN` record, extracts the `Deal`, `Dealer`, a
 - `DDS` API: `engine/dds/include/dll.h`.
 - `DDS` documentation: `engine/dds/doc/dll-description.md`.
 - `PBN` specification: <https://www.tistis.nl/pbn/pbn_v21.txt>.
+- Project `PBN` input contract: `pbn-input-contract.md`.
 - `DDS` functions for this phase: `CalcDDtablePBN`, `DealerPar`, `SetMaxThreads`, and `ErrorMessage`.
 - `DDS` macOS static build file: `engine/dds/src/Makefiles/Makefile_Mac_clang_static`.
 
@@ -76,13 +77,14 @@ Key facts from `engine/dds/include/dll.h`:
 - `DealerPar` takes `ddTableResults *`, `parResultsDealer *`, `dealer`, and `vulnerable`.
 - `SetMaxThreads` and `ErrorMessage` both return `void`.
 
-The root `Makefile` owns the stable library location:
+The root `Makefile` owns the stable library location. On `macOS`, the project disables `DDS_THREADS_BOOST` and builds with `DDS_THREADS_GCD` and `DDS_THREADS_STL`; this keeps multi-threading while avoiding a `Boost` build and link dependency.
 
 ```make
 .PHONY: build-dds build-cli test
 
 build-dds:
-	$(MAKE) -C engine/dds/src -f Makefiles/Makefile_Mac_clang_static macos
+	$(MAKE) -C engine/dds/src -f Makefiles/Makefile_Mac_clang_static macos \
+		THREADING="-DDDS_THREADS_GCD -DDDS_THREADS_STL"
 	mkdir -p engine/dds/lib
 	cp engine/dds/src/libdds.a engine/dds/lib/libdds.a
 
@@ -268,24 +270,21 @@ pub struct Board {
 
 ### 5. `PBN` Parsing
 
-`src/core/pbn.rs` is the single source of truth for `PBN` parsing and serialization.
+`src/core/pbn.rs` implements the subset defined by `pbn-input-contract.md`.
 
 ```rust
 pub fn parse_record(input: &str) -> Result<Board, Error>;
 pub fn parse_deal_tag(value: &str) -> Result<Deal, Error>;
-pub fn deal_to_pbn_tag_value(deal: &Deal) -> String;
+pub fn deal_to_dds_pbn(deal: &Deal) -> String;
 pub fn parse_dealer_tag(value: &str) -> Result<Direction, Error>;
 pub fn parse_vulnerable_tag(value: &str) -> Result<Vulnerability, Error>;
 ```
 
-Supported `Vulnerable` values:
+`parse_record` handles one board per input. It ignores unknown tags, rejects duplicate required tags, supports `LF` and `CRLF`, and requires exact tag names for `Deal`, `Dealer`, and `Vulnerable`.
 
-- `None`, `Love`, and `-` map to `Vulnerability::None`.
-- `NS` maps to `Vulnerability::NS`.
-- `EW` maps to `Vulnerability::EW`.
-- `All` and `Both` map to `Vulnerability::Both`.
+`deal_to_dds_pbn` returns the value expected by `ddTableDealPBN.cards`. It does not include the `[Deal "..."]` wrapper. It emits hands clockwise from `Deal.first`, uses suit order `S.H.D.C`, and normalizes ranks to descending order.
 
-`Phase 1a` requires all four hands in the `Deal` tag. Partial deals using `-` are rejected with a clear parse error.
+`Phase 1a` rejects unsupported `PBN` features before calling `DDS`.
 
 ### 6. Tricks Matrix
 
@@ -315,6 +314,23 @@ E      8  6  7  5  6
 S      5  6  5  7  6
 W      8  6  7  5  6
 Par: -110; 2S-EW
+```
+
+The `JSON` output is fixed as:
+
+```json
+{
+  "tricks": {
+    "N": { "S": 5, "H": 6, "D": 5, "C": 7, "NT": 6 },
+    "E": { "S": 8, "H": 6, "D": 7, "C": 5, "NT": 6 },
+    "S": { "S": 5, "H": 6, "D": 5, "C": 7, "NT": 6 },
+    "W": { "S": 8, "H": 6, "D": 7, "C": 5, "NT": 6 }
+  },
+  "par": {
+    "score": -110,
+    "contracts": ["2S-EW"]
+  }
+}
 ```
 
 ### 7. Par Types
@@ -362,7 +378,7 @@ impl DdsSolver {
 }
 ```
 
-`solve_table` serializes `Deal` back to a `PBN` deal-tag value including `<first>:` and copies it into `ddTableDealPBN.cards`. It must reject strings that do not fit into the `80` byte `DDS` buffer.
+`solve_table` serializes `Deal` with `deal_to_dds_pbn` and copies the result into `ddTableDealPBN.cards`. It must reject strings that do not fit into the `80` byte `DDS` buffer.
 
 ### 9. `CLI`
 
@@ -381,9 +397,6 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Solve {
-        #[arg(default_value = "-")]
-        input: String,
-
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
@@ -398,13 +411,13 @@ enum OutputFormat {
 
 Execution flow:
 
-1. Read a `PBN` record from `stdin`, a file path, or a direct string argument.
+1. Read one `PBN` record from `stdin`.
 2. Parse `Deal`, `Dealer`, and `Vulnerable`.
 3. Call `DdsSolver::solve_table`.
 4. Call `DdsSolver::compute_par`.
 5. Print text or `JSON`.
 
-The `CLI` does not expose `--dealer` or `--vul` in `Phase 1a`.
+The `CLI` does not expose `--dealer`, `--vul`, file path input, or direct `PBN` string input in `Phase 1a`. Files and strings can be passed through shell pipes or redirection.
 
 ### 10. Error Handling
 
@@ -420,6 +433,25 @@ pub enum Error {
 
     #[error("missing required PBN tag: {0}")]
     MissingPbnTag(&'static str),
+
+    #[error("duplicate PBN tag: {0}")]
+    DuplicatePbnTag(&'static str),
+
+    #[error("invalid PBN tag {tag}: {value}")]
+    InvalidPbnTag { tag: &'static str, value: String },
+
+    #[error("unsupported PBN feature: {0}")]
+    UnsupportedPbnFeature(String),
+
+    #[error("invalid deal: {0}")]
+    InvalidDeal(String),
+
+    #[error("DDS buffer too long for {field}: {len} bytes, max {max}")]
+    DdsBufferTooLong {
+        field: &'static str,
+        len: usize,
+        max: usize,
+    },
 
     #[error("DDS error: {0}")]
     Dds(String),
@@ -440,6 +472,8 @@ The `CLI` prints errors to `stderr` and exits non-zero.
   - Accepts valid `Vulnerable` aliases.
   - Rejects missing `Dealer`.
   - Rejects missing `Vulnerable`.
+  - Rejects duplicate required tags.
+  - Rejects unsupported features defined in `pbn-input-contract.md`.
   - Rejects partial `Deal` tags with `-`.
   - Preserves `Deal.first` without treating it as `Board.dealer`.
 - `cargo test` for domain types:
@@ -448,15 +482,14 @@ The `CLI` prints errors to `stderr` and exits non-zero.
   - Each full parsed board has `52` unique cards.
 - `cargo test` for `DDS` integration:
   - Build `engine/dds/lib/libdds.a`.
-  - Use a known `DDS` example deal and assert all `20` table values.
-  - Use a known `DDS` example table and assert `DealerPar` score and contracts.
+  - Use `engine/dds/examples/hands.cpp` `PBN[0]` and assert all `20` values from `DDtable[0]`.
+  - Use `dealer[0]`, `vul[0]`, `dealerScore[0]`, and `dealerContract[0]` from `engine/dds/examples/hands.cpp` to assert `DealerPar`.
   - Verify `ErrorMessage(RETURN_NO_FAULT)` returns a non-empty message.
 
 ### Manual Checks
 
-- `bridge solve examples/board.pbn` prints a `4x5` tricks matrix and par line.
-- `bridge solve - < examples/board.pbn` behaves the same.
-- `bridge solve examples/board.pbn --format json` prints valid `JSON`.
+- `bridge solve < examples/board.pbn` prints a `4x5` tricks matrix and par line.
+- `bridge solve --format json < examples/board.pbn` prints valid `JSON` matching the documented response shape.
 - A record without `Dealer` fails clearly.
 - A record without `Vulnerable` fails clearly.
 - A record whose `Deal` `<first>` differs from `Dealer` is accepted and computes par using `Dealer`.

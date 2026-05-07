@@ -11,11 +11,11 @@
 - [ ] Build `DDS` with its platform `Makefile`, then copy the static library to `engine/dds/lib/libdds.a`.
 - [ ] Add hand-written `FFI` declarations in `src/dds/ffi.rs`, verified against `engine/dds/include/dll.h`.
 - [ ] Build a safe wrapper around `CalcDDtablePBN`, `DealerPar`, `SetMaxThreads`, and `ErrorMessage` in `src/dds/`.
-- [ ] Implement `PBN` record parsing for `Deal`, `Dealer`, and `Vulnerable`.
+- [ ] Implement the global `PBN` subset defined in `phases/pbn-input-contract.md`.
 - [ ] Implement `Deal`, `Hand`, `Direction`, `Strain`, `Suit`, `Rank`, and `Card` domain types.
 - [ ] Implement the full `4x5` tricks matrix, preserving all `20` declarer-and-strain results.
 - [ ] Implement `DealerPar` calculation from the tricks matrix using parsed `Dealer` and `Vulnerable` tags.
-- [ ] Add the `bridge solve` command: accept a `PBN` record from a file, argument, or `stdin`; output the tricks matrix and par result as text or `JSON`.
+- [ ] Add the `bridge solve` command: accept one `PBN` record on `stdin`; output the tricks matrix and par result as text or `JSON`.
 
 ### `1b` - Mid-Hand Analysis
 

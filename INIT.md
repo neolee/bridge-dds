@@ -27,7 +27,7 @@ The project does not rewrite the `DDS` engine. It binds to the small required `C
 
 ## Input Model
 
-`PBN` is the canonical input format. The `CLI` accepts a complete or minimal `PBN` record, not separate command-line options for fields already present in `PBN`.
+`PBN` is the canonical input format. The accepted subset is defined in `phases/pbn-input-contract.md`. The `CLI` accepts one `PBN` record on `stdin`, not separate command-line options for fields already present in `PBN`.
 
 For `Phase 1a`, a valid input record must include:
 
@@ -44,6 +44,7 @@ The `Deal` tag's `<first>` direction is only the first hand listed in the deal s
 - The `bridge` binary is the `CLI`.
 - The later `bridge-server` binary will expose the same operations through `REST` endpoints.
 - `DDS` build output is copied to `engine/dds/lib/libdds.a`, and `build.rs` links against that stable path.
+- The `macOS` `DDS` build disables `DDS_THREADS_BOOST` and uses `DDS_THREADS_GCD` plus `DDS_THREADS_STL`.
 
 The core library contains:
 
@@ -60,6 +61,7 @@ Both binaries should compile to standalone executables with no required runtime 
 ## `CLI` Design Principles
 
 - `PBN` in, text or `JSON` out.
+- One board is read from `stdin`.
 - No interactive prompts.
 - The default output is readable plain text.
 - `--format json` provides machine-readable output.
