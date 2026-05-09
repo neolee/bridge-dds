@@ -6,16 +6,16 @@
 
 ### `1a` - Full-Deal `DDS` Evaluation
 
-- [ ] Set up the `Rust` project structure: `Cargo.toml`, `src/lib.rs`, `src/cli/`, and `build.rs`.
-- [ ] Keep `dds` as a git submodule under `engine/dds`.
-- [ ] Build `DDS` with its platform `Makefile`, then copy the static library to `engine/dds/lib/libdds.a`.
-- [ ] Add hand-written `FFI` declarations in `src/dds/ffi.rs`, verified against `engine/dds/include/dll.h`.
-- [ ] Build a safe wrapper around `CalcDDtablePBN`, `DealerPar`, `SetMaxThreads`, and `ErrorMessage` in `src/dds/`.
-- [ ] Implement the global `PBN` subset defined in `phases/pbn-input-contract.md`.
-- [ ] Implement `Deal`, `Hand`, `Direction`, `Strain`, `Suit`, `Rank`, and `Card` domain types.
-- [ ] Implement the full `4x5` tricks matrix, preserving all `20` declarer-and-strain results.
-- [ ] Implement `DealerPar` calculation from the tricks matrix using parsed `Dealer` and `Vulnerable` tags.
-- [ ] Add the `bridge solve` command: accept one `PBN` record on `stdin`; output the tricks matrix and par result as text or `JSON`.
+- [x] Set up the `Rust` project structure: `Cargo.toml`, `src/lib.rs`, `src/cli/`, and `build.rs`.
+- [x] Keep `dds` as a git submodule under `engine/dds`.
+- [x] Build `DDS` with its platform `Makefile`, then copy the static library to `engine/dds/lib/libdds.a`.
+- [x] Add hand-written `FFI` declarations in `src/dds/ffi.rs`, verified against `engine/dds/include/dll.h`.
+- [x] Build a safe wrapper around `CalcDDtablePBN`, `DealerPar`, `SetMaxThreads`, and `ErrorMessage` in `src/dds/`.
+- [x] Implement the global `PBN` subset defined in `phases/pbn-input-contract.md`.
+- [x] Implement `Deal`, `Hand`, `Direction`, `Strain`, `Suit`, `Rank`, and `Card` domain types.
+- [x] Implement the full `4x5` tricks matrix, preserving all `20` declarer-and-strain results.
+- [x] Implement `DealerPar` calculation from the tricks matrix using parsed `Dealer` and `Vulnerable` tags.
+- [x] Add the `bridge solve` command: accept one `PBN` record on `stdin`; output the tricks matrix and par result as text or `JSON`.
 
 ### `1b` - Mid-Hand Analysis
 

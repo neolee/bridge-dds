@@ -77,23 +77,9 @@ Key facts from `engine/dds/include/dll.h`:
 - `DealerPar` takes `ddTableResults *`, `parResultsDealer *`, `dealer`, and `vulnerable`.
 - `SetMaxThreads` and `ErrorMessage` both return `void`.
 
-The root `Makefile` owns the stable library location. On `macOS`, the project disables `DDS_THREADS_BOOST` and builds with `DDS_THREADS_GCD` and `DDS_THREADS_STL`; this keeps multi-threading while avoiding a `Boost` build and link dependency.
-
-```make
-.PHONY: build-dds build-cli test
-
-build-dds:
-	$(MAKE) -C engine/dds/src -f Makefiles/Makefile_Mac_clang_static macos \
-		THREADING="-DDDS_THREADS_GCD -DDDS_THREADS_STL"
-	mkdir -p engine/dds/lib
-	cp engine/dds/src/libdds.a engine/dds/lib/libdds.a
-
-build-cli: build-dds
-	cargo build --release
-
-test: build-dds
-	cargo test
-```
+The `DDS` build is provided by `scripts/build-dds-macos.sh`. It compiles `engine/dds` with
+`DDS_THREADS_GCD` and `DDS_THREADS_STL`, avoiding a `Boost` dependency, and copies the result
+to `engine/dds/lib/libdds.a`.
 
 `build.rs` links against `engine/dds/lib`:
 

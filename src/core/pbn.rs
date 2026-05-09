@@ -1,6 +1,4 @@
-use super::deal::{
-    Board, Card, Deal, Direction, Hand, Rank, Suit, Vulnerability,
-};
+use super::deal::{Board, Card, Deal, Direction, Hand, Rank, Suit, Vulnerability};
 use super::error::Error;
 
 /// Parse a single PBN record into a `Board`.
@@ -53,22 +51,22 @@ pub fn parse_record(input: &str) -> Result<Board, Error> {
 fn parse_tag_line(line: &str) -> Result<(&str, &str), Error> {
     let line = line.trim();
     if !line.starts_with('[') || !line.ends_with(']') {
-        return Err(Error::PbnParse(format!(
-            "invalid tag line: {}",
-            line
-        )));
+        return Err(Error::PbnParse(format!("invalid tag line: {}", line)));
     }
     let inner = &line[1..line.len() - 1]; // strip [ and ]
-    let space_pos = inner.find(' ').ok_or_else(|| {
-        Error::PbnParse(format!("missing space in tag line: {}", line))
-    })?;
+    let space_pos = inner
+        .find(' ')
+        .ok_or_else(|| Error::PbnParse(format!("missing space in tag line: {}", line)))?;
     let tag = &inner[..space_pos];
     let raw_value = inner[space_pos + 1..].trim();
     // Strip surrounding double quotes.
     let value = if raw_value.starts_with('"') && raw_value.ends_with('"') {
         &raw_value[1..raw_value.len() - 1]
     } else {
-        raw_value
+        return Err(Error::PbnParse(format!(
+            "tag value must be quoted: {}",
+            line
+        )));
     };
     Ok((tag, value))
 }
@@ -79,16 +77,17 @@ fn parse_tag_line(line: &str) -> Result<(&str, &str), Error> {
 /// Hands are clockwise from `<first>`, each hand is four suit fields in `S.H.D.C` order.
 pub fn parse_deal_tag(value: &str) -> Result<Deal, Error> {
     // Find the <first> prefix.
-    let colon_pos = value.find(':').ok_or_else(|| {
-        Error::PbnParse(format!("missing ':' in deal tag: {}", value))
-    })?;
-    let first_char = &value[..colon_pos];
-    let first = Direction::from_char(
-        first_char.chars().next().unwrap_or(' '),
-    )
-    .ok_or_else(|| {
-        Error::InvalidDeal(format!("invalid <first> direction: {}", first_char))
-    })?;
+    let colon_pos = value
+        .find(':')
+        .ok_or_else(|| Error::PbnParse(format!("missing ':' in deal tag: {}", value)))?;
+    if colon_pos != 1 {
+        return Err(Error::InvalidDeal(format!(
+            "<first> must be a single direction letter before ':', got '{}'",
+            &value[..colon_pos]
+        )));
+    }
+    let first = Direction::from_char(value.chars().next().unwrap())
+        .ok_or_else(|| Error::InvalidDeal(format!("invalid <first> direction: {}", &value[..1])))?;
 
     let hands_str = &value[colon_pos + 1..];
     let hand_strs: Vec<&str> = hands_str.split_whitespace().collect();
@@ -123,13 +122,15 @@ pub fn parse_deal_tag(value: &str) -> Result<Deal, Error> {
                 cards.len()
             )));
         }
-        hands[dest_idx] = Hand::from_cards(&cards);
+        hands[dest_idx] = Hand::from_cards(&cards)?;
         all_cards.extend(cards);
     }
 
     // Check for duplicate cards.
     if all_cards.len() != 52 {
-        return Err(Error::InvalidDeal("board does not have exactly 52 cards".into()));
+        return Err(Error::InvalidDeal(
+            "board does not have exactly 52 cards".into(),
+        ));
     }
     // Deduplication check: since we have exactly 52 cards and no hand errors,
     // duplicates would mean missing cards elsewhere. We check by building a bitmask.
@@ -165,10 +166,7 @@ fn parse_hand_pbn(hand_str: &str) -> Result<Vec<Card>, Error> {
     for (suit_idx, suit_str) in suit_strs.iter().enumerate() {
         for ch in suit_str.chars() {
             let rank = Rank::from_char(ch).ok_or_else(|| {
-                Error::InvalidDeal(format!(
-                    "invalid rank char '{}' in hand '{}'",
-                    ch, hand_str
-                ))
+                Error::InvalidDeal(format!("invalid rank char '{}' in hand '{}'", ch, hand_str))
             })?;
             cards.push(Card::new(suits[suit_idx], rank));
         }
@@ -177,11 +175,16 @@ fn parse_hand_pbn(hand_str: &str) -> Result<Vec<Card>, Error> {
 }
 
 fn parse_dealer_tag(value: &str) -> Result<Direction, Error> {
-    Direction::from_char(value.chars().next().unwrap_or(' ')).ok_or_else(|| {
-        Error::InvalidPbnTag {
+    let trimmed = value.trim();
+    if trimmed.len() != 1 {
+        return Err(Error::InvalidPbnTag {
             tag: "Dealer",
             value: value.to_string(),
-        }
+        });
+    }
+    Direction::from_char(trimmed.chars().next().unwrap()).ok_or_else(|| Error::InvalidPbnTag {
+        tag: "Dealer",
+        value: value.to_string(),
     })
 }
 
@@ -305,8 +308,7 @@ mod tests {
             let rec = format!("{}[Vulnerable \"{}\"]\n", base, val);
             let board = parse_record(&rec).unwrap();
             assert_eq!(
-                board.vulnerable,
-                *expected,
+                board.vulnerable, *expected,
                 "Vulnerable '{}' did not map correctly",
                 val
             );
@@ -333,5 +335,35 @@ mod tests {
         assert_eq!(board.deal.first, Direction::East);
         // Dealer is N because the Dealer tag says so.
         assert_eq!(board.dealer, Direction::North);
+    }
+
+    #[test]
+    fn test_reject_multi_char_dealer() {
+        let rec = "\
+[Deal \"N:QJ6.K652.J85.T98 873.J97.AT764.Q4 K5.T83.KQ9.A7652 AT942.AQ4.32.KJ3\"]
+[Dealer \"North\"]
+[Vulnerable \"None\"]
+";
+        assert!(parse_record(rec).is_err());
+    }
+
+    #[test]
+    fn test_reject_unquoted_tag_value() {
+        let rec = "\
+[Deal \"N:QJ6.K652.J85.T98 873.J97.AT764.Q4 K5.T83.KQ9.A7652 AT942.AQ4.32.KJ3\"]
+[Dealer N]
+[Vulnerable \"None\"]
+";
+        assert!(parse_record(rec).is_err());
+    }
+
+    #[test]
+    fn test_reject_multi_char_deal_first() {
+        let rec = "\
+[Deal \"North:QJ6.K652.J85.T98 873.J97.AT764.Q4 K5.T83.KQ9.A7652 AT942.AQ4.32.KJ3\"]
+[Dealer \"N\"]
+[Vulnerable \"None\"]
+";
+        assert!(parse_record(rec).is_err());
     }
 }

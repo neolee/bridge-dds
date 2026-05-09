@@ -183,6 +183,8 @@ impl Rank {
     }
 }
 
+use super::error::Error;
+
 /// A single playing card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Card {
@@ -362,13 +364,21 @@ impl Hand {
         Hand(0)
     }
 
-    pub fn from_cards(cards: &[Card]) -> Self {
+    pub fn from_cards(cards: &[Card]) -> Result<Self, Error> {
         let mut bits: u64 = 0;
         for card in cards {
             let pos = card.suit.dds_index() * 13 + card.rank.bit_index();
-            bits |= 1u64 << pos;
+            let mask = 1u64 << pos;
+            if bits & mask != 0 {
+                return Err(Error::InvalidDeal(format!(
+                    "duplicate card: {}{}",
+                    card.suit.as_char(),
+                    card.rank.as_char()
+                )));
+            }
+            bits |= mask;
         }
-        Hand(bits)
+        Ok(Hand(bits))
     }
 
     pub fn cards(&self) -> impl Iterator<Item = Card> {
@@ -393,14 +403,25 @@ impl Hand {
         self.0.count_ones() as usize
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
     pub fn remove(&self, card: Card) -> Self {
         let pos = card.suit.dds_index() * 13 + card.rank.bit_index();
         Hand(self.0 & !(1u64 << pos))
     }
 
-    pub fn add(&self, card: Card) -> Self {
+    pub fn add(&self, card: Card) -> Result<Self, Error> {
+        if self.contains(card) {
+            return Err(Error::InvalidDeal(format!(
+                "duplicate card: {}{}",
+                card.suit.as_char(),
+                card.rank.as_char()
+            )));
+        }
         let pos = card.suit.dds_index() * 13 + card.rank.bit_index();
-        Hand(self.0 | (1u64 << pos))
+        Ok(Hand(self.0 | (1u64 << pos)))
     }
 }
 
@@ -458,7 +479,7 @@ mod tests {
             Card::new(Suit::Diamonds, Rank::Queen),
             Card::new(Suit::Clubs, Rank::Two),
         ];
-        let hand = Hand::from_cards(&cards);
+        let hand = Hand::from_cards(&cards).unwrap();
         assert_eq!(hand.len(), 4);
         let recovered: Vec<Card> = hand.cards().collect();
         assert_eq!(recovered.len(), 4);
@@ -467,7 +488,7 @@ mod tests {
             let removed = hand.remove(*c);
             assert_eq!(removed.len(), 3);
             assert!(!removed.contains(*c));
-            let added_back = removed.add(*c);
+            let added_back = removed.add(*c).unwrap();
             assert_eq!(added_back.len(), 4);
             assert!(added_back.contains(*c));
         }

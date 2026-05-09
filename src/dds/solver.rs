@@ -1,4 +1,5 @@
 use std::ffi::CStr;
+use std::sync::{Mutex, Once};
 
 use super::ffi;
 use crate::core::deal::{Deal, Direction, Vulnerability};
@@ -7,17 +8,27 @@ use crate::core::par::ParResult;
 use crate::core::pbn;
 use crate::core::tricks::TricksMatrix;
 
+static DDS_INIT: Once = Once::new();
+
+/// Serialize all DDS calls. The DDS library uses shared internal state
+/// (transposition tables, thread pools) that is not safe for concurrent
+/// access from multiple Rust threads.
+static DDS_LOCK: Mutex<()> = Mutex::new(());
+
 pub struct DdsSolver;
 
 impl DdsSolver {
-    /// Initialize DDS threading. Call once at startup.
+    /// Initialize DDS threading. Safe to call multiple times; only runs once.
     /// `0` lets DDS auto-configure based on available cores and memory.
     pub fn init() {
-        unsafe { ffi::SetMaxThreads(0); }
+        DDS_INIT.call_once(|| unsafe {
+            ffi::SetMaxThreads(0);
+        });
     }
 
     /// Compute the full 20-result tricks matrix for a fresh deal.
     pub fn solve_table(deal: &Deal) -> Result<TricksMatrix, Error> {
+        let _guard = DDS_LOCK.lock().unwrap();
         let pbn_str = pbn::deal_to_dds_pbn(deal);
 
         // Reject strings that don't fit in DDS's 80-byte buffer.
@@ -54,6 +65,7 @@ impl DdsSolver {
         dealer: Direction,
         vul: Vulnerability,
     ) -> Result<ParResult, Error> {
+        let _guard = DDS_LOCK.lock().unwrap();
         let raw_table = table.to_dds();
         let mut dd_table = ffi::ddTableResults {
             resTable: raw_table,
@@ -75,11 +87,9 @@ impl DdsSolver {
 
         let contracts: Vec<String> = (0..par.number as usize)
             .map(|i| {
-                unsafe {
-                    CStr::from_ptr(par.contracts[i].as_ptr())
-                }
-                .to_string_lossy()
-                .into_owned()
+                unsafe { CStr::from_ptr(par.contracts[i].as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned()
             })
             .collect();
 
@@ -92,11 +102,9 @@ impl DdsSolver {
     /// Convert a DDS return code to a human-readable string.
     fn error_message(code: i32) -> String {
         let mut buf: [std::os::raw::c_char; 80] = [0; 80];
-        unsafe { ffi::ErrorMessage(code, buf.as_mut_ptr()); }
         unsafe {
-            CStr::from_ptr(buf.as_ptr())
-                .to_string_lossy()
-                .into_owned()
+            ffi::ErrorMessage(code, buf.as_mut_ptr());
         }
+        unsafe { CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned() }
     }
 }

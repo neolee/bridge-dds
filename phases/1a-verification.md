@@ -114,16 +114,18 @@ Par: 5H*-NS-2; -300
 
 ### 5. Deal.first differs from Dealer
 
-Verify that `<first>` in the `Deal` tag and the `Dealer` tag are handled independently:
+Verify that `<first>` in the `Deal` tag and the `Dealer` tag are handled independently.
+This deal has the same hands as Deal 1 (section 1), but hands are rotated so `<first>` is `E`
+instead of `N`. Dealer is still `N`.
 
 ```bash
-echo '[Deal "E:QJ6.K652.J85.T98 873.J97.AT764.Q4 K5.T83.KQ9.A7652 AT942.AQ4.32.KJ3"]
+echo '[Deal "E:873.J97.AT764.Q4 K5.T83.KQ9.A7652 AT942.AQ4.32.KJ3 QJ6.K652.J85.T98"]
 [Dealer "N"]
 [Vulnerable "None"]
 ' | cargo run -- solve
 ```
 
-Expected: tricks matrix identical to Deal 1 in section 1 (same hands, just rotated presentation), but par uses Dealer=N.
+Expected: tricks matrix identical to Deal 1 (same hands, just rotated presentation), but par uses Dealer=N.
 
 ### 6. Vulnerable aliases
 

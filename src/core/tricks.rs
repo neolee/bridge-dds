@@ -13,12 +13,18 @@ impl TricksMatrix {
     /// DDS layout: resTable[strain 0=S..4=NT][declarer 0=N..3=W].
     pub fn from_dds(raw: &[[i32; 4]; 5]) -> Self {
         let mut data = [[0u8; 4]; 5];
-        for strain in 0..5 {
-            for decl in 0..4 {
-                data[strain][decl] = raw[strain][decl] as u8;
+        for (strain, row) in raw.iter().enumerate() {
+            for (decl, &val) in row.iter().enumerate() {
+                data[strain][decl] = val as u8;
             }
         }
         TricksMatrix { data }
+    }
+
+    /// Raw access to the tricks matrix (for tests).
+    /// Layout: data[strain 0=S..4=NT][declarer 0=N..3=W]
+    pub fn data(&self) -> &[[u8; 4]; 5] {
+        &self.data
     }
 
     pub fn get(&self, strain: Strain, declarer: Direction) -> u8 {
@@ -36,9 +42,9 @@ impl TricksMatrix {
     /// Convert back to DDS `ddTableResults` layout for `DealerPar()`.
     pub(crate) fn to_dds(&self) -> [[i32; 4]; 5] {
         let mut raw = [[0i32; 4]; 5];
-        for strain in 0..5 {
-            for decl in 0..4 {
-                raw[strain][decl] = self.data[strain][decl] as i32;
+        for (strain, row) in self.data.iter().enumerate() {
+            for (decl, &val) in row.iter().enumerate() {
+                raw[strain][decl] = val as i32;
             }
         }
         raw

@@ -34,10 +34,7 @@ extern "C" {
 
     /// Compute the 20-result double-dummy table for a fresh deal.
     /// `tableDealPBN` is passed by value per the DDS API.
-    pub fn CalcDDtablePBN(
-        tableDealPBN: ddTableDealPBN,
-        tablep: *mut ddTableResults,
-    ) -> c_int;
+    pub fn CalcDDtablePBN(tableDealPBN: ddTableDealPBN, tablep: *mut ddTableResults) -> c_int;
 
     /// Compute par score and contracts from a DD table, dealer-aware.
     /// `dealer`: 0=N, 1=E, 2=S, 3=W. `vulnerable`: 0=None, 1=Both, 2=NS, 3=EW.
