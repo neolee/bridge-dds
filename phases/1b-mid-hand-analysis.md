@@ -1,343 +1,531 @@
-# Phase 1b -- Mid-Hand Analysis
+# Phase 1b -- Position Analysis
 
 ## Goal
 
-Extend the CLI and library to accept a partial play trace. Given a deal, a contract, and the first `k` tricks already played, derive the residual state (remaining cards, current leader, partial trick state) and call `SolveBoardPBN` to return the optimal continuation from the current position.
+Implement `Position`-based double-dummy analysis.
+
+Given remaining hands, the next player to act, optional cards already played to the current trick, and a `trump`, call `SolveBoardPBN` to evaluate legal continuations. For clean residual snapshots, also produce a `next_to_act x strain` matrix similar in shape to the full-deal `DDS` matrix.
+
+This phase is centered on the current position, not on how that position was reached. A position may come from a complete deal at trick one, a manually entered residual deal, or a complete deal plus a `Play` trace.
+
+## Key Decisions
+
+- The core solver interface uses `next_to_act` and `trump`, not `declarer`.
+- `declarer`, `dummy`, and defenders are `UI` concepts. They can be layered on top when the user starts from a normal contract.
+- The raw `DDS` score from `SolveBoardPBN` is interpreted as `tricks_for_side_to_act`.
+- Manual residual input starts only from a clean trick boundary: all four hands have the same card count and `current_trick` is empty.
+- Runtime trial play must support `current_trick` lengths from `0` to `3`, because hands become uneven during a trick.
+- `Play` trace import is an extra entry path. It derives a `Position`, then reuses the same analysis pipeline.
+
+These decisions keep the library model independent from contract scoring. This matters because residual positions often lack the earlier trick history, so total tricks and score may be unknowable and are not required for continuation analysis.
 
 ## Reference
 
-- DDS API: `engine/dds/include/dll.h` -- `SolveBoardPBN`, `dealPBN`, `futureTricks`.
-- DDS documentation: `engine/dds/doc/dll-description.md`.
-- PBN specification: <https://www.tistis.nl/pbn/pbn_v21.txt> (section 3.3 Play data).
-- Project PBN input contract: `phases/pbn-input-contract.md`.
+- `DDS` `API`: `engine/dds/include/dll.h` -- `SolveBoardPBN`, `dealPBN`, `futureTricks`.
+- `DDS` documentation: `engine/dds/doc/dll-description.md`.
+- `PBN` specification: <https://www.tistis.nl/pbn/pbn_v21.txt>.
+- Project `PBN` input contract: `phases/pbn-input-contract.md`.
 
 ## Scope
 
-### In scope
+### In Scope
 
-- Parse a PBN `Play` tag value into a structured play trace (sequence of cards in play order).
-- Accept `--trump` and `--declarer` CLI flags to specify the contract.
-- Derive the residual state after `k` cards have been played:
-  - Remaining cards per hand (52 minus played cards).
-  - Current leader (winner of last completed trick, or next player if mid-trick).
-  - Cards already played to the current incomplete trick (0-3 cards).
-  - Tricks already won by each side.
-- Call `SolveBoardPBN` with the residual state.
-- Display the suggested cards and their double-dummy scores (tricks from this position).
-- Validate the play trace:
-  - Every played card belongs to the player who is claimed to have played it.
-  - No card is played twice.
-  - (Warning only) follow-suit violations.
+- Add core `Position` types.
+- Add `DDS` `FFI` bindings for `SolveBoardPBN`.
+- Convert a `Position` into `dealPBN`.
+- Solve one `Position + trump` and return legal card results.
+- Return every legal card with a double-dummy score.
+- Produce a residual `next_to_act x strain` matrix for clean snapshots.
+- Extend the `CLI` with a residual-position entry path.
+- Support runtime trial-play state advancement with `current_trick`.
+- Extra step: parse a `PBN` `Play` tag and derive a `Position`.
 
-### Out of scope
+### Out Of Scope
 
-- `AnalysePlayPBN` (post-mortem evaluation of each card in sequence). Useful but not required for "what should I play next?"
-- Parsing the `Contract` or `Auction` PBN tags. The contract is provided via CLI flags.
-- Multi-board batch analysis with play traces.
+- Contract scoring from residual positions without prior trick counts.
+- `AnalysePlayPBN` post-mortem evaluation for every historical card.
+- Multi-board batch analysis with positions.
+- Web `UI` concepts such as `declarer`, `dummy`, undo history, and color marking. The library should expose enough data for those later.
+
+## Concepts
+
+### `Position`
+
+`Position` is the single state object accepted by continuation analysis.
+
+```rust
+pub struct Position {
+    /// Remaining cards for each player in `N`, `E`, `S`, `W` order.
+    pub hands: [Hand; 4],
+    /// The next player who must play a card.
+    pub next_to_act: Direction,
+    /// Cards already played to the current trick, in play order.
+    pub current_trick: Vec<PlayedCard>,
+}
+
+pub struct PlayedCard {
+    pub player: Direction,
+    pub card: Card,
+}
+```
+
+`current_trick.len()` must be between `0` and `3`. Cards in `current_trick` are already removed from `hands`.
+
+When `current_trick` is empty, `next_to_act` is also the trick leader. When `current_trick` is not empty, `next_to_act` is only the next player to act.
+
+### `Entry Snapshot`
+
+An `Entry Snapshot` is a manually entered residual deal.
+
+Rules:
+
+- All four hands have the same card count.
+- `current_trick` is empty.
+- `next_to_act` is the trick leader.
+
+This is the first supported residual input mode. It avoids accepting ambiguous mid-trick manual states.
+
+### `Runtime Position`
+
+A `Runtime Position` is an internal state during trial play.
+
+Rules:
+
+- `current_trick.len()` may be `0`, `1`, `2`, or `3`.
+- Hand counts may differ.
+- `next_to_act` is the next player to act.
+- Cards in `current_trick` have already been removed from `hands`.
+
+This state is required after the user plays one or more cards during a trick.
+
+### `Position Matrix`
+
+A `Position Matrix` evaluates a clean residual snapshot across possible `next_to_act` and `strain` values.
+
+- Rows: hypothetical `next_to_act` values: `N`, `E`, `S`, `W`.
+- Columns: `S`, `H`, `D`, `C`, `NT`.
+- Value: maximum tricks from the current position for the side containing `next_to_act`.
+
+This matrix has the same shape as the full-deal `DDS` matrix, but it has different semantics. Full-deal rows are `declarer` values. Position rows are `next_to_act` values.
+
+### `Continuation Analysis`
+
+`Continuation Analysis` evaluates one `Position + trump`.
+
+Output:
+
+- Every legal card for `next_to_act`.
+- `tricks_for_side_to_act` for each card.
+- Whether each card is optimal.
+
+Use `SolveBoardPBN` with `solutions = 3`, because the trial-play `UI` needs all legal cards, not only optimal cards.
 
 ## Tasks
 
-### 1. Play trace parsing (`src/core/play.rs`)
+### 1. Add `Position` Types (`src/core/position.rs`)
 
-Parse the PBN `Play` tag value.
-
-**Format:**
-
-```pbn
-[Play "W:S6=S4=SJ=SQ=S3=S7=S9=SK"]
-```
-
-- Tricks are separated by whitespace.
-- Within each trick, cards are separated by `=`.
-- Each card is a suit letter (`S`/`H`/`D`/`C`) followed by a rank character.
-- The first card of the first trick is played by the opening leader.
-
-**Data type:**
+Add `Position`, `PlayedCard`, and validation helpers.
 
 ```rust
-/// A parsed play trace. Cards in play order, each annotated with the
-/// direction that played it (derived from the opening leader and trick winners).
-#[derive(Debug, Clone)]
-pub struct PlayTrace {
-    /// Cards in the order they were played, with the player who played each.
-    pub plays: Vec<(Direction, Card)>,
-    /// The opening leader (derived from the first card's player tag, or
-    /// from declarer if we use `--declarer`).
-    pub opening_leader: Direction,
-}
-```
-
-**Parsing logic:**
-
-```rust
-pub fn parse_play_tag(value: &str, opening_leader: Direction) -> Result<PlayTrace, Error>;
-```
-
-- Split value by whitespace to get tricks.
-- For each trick, split by `=` to get individual cards.
-- Parse each card string: suit char + rank char → `Card`.
-- Each trick must have exactly 4 cards (no incomplete tricks in the trace).
-- Track play order: first card of each trick is played by the current leader.
-  Determine winner of each trick (apply follow-suit and trump rules), next
-  trick's leader is the winner.
-
-### 2. Validate the play trace (`src/core/play.rs`)
-
-```rust
-pub fn validate_trace(
-    trace: &PlayTrace,
-    deal: &Deal,
-    trump: Strain,
-) -> Result<(), Vec<PlayWarning>>;
-```
-
-**Hard errors** (returned as `Err`):
-- A card is not held by the player who supposedly played it.
-- The same card appears more than once in the trace.
-
-**Warnings** (returned in the `Vec<PlayWarning>`):
-- Follow-suit violation: a player had a card in the led suit but played another suit.
-- The computed trick winner differs from who led the next trick in the trace
-  (may indicate the trace is incorrectly formatted, or the opener's tag is wrong).
-
-These warnings do not block the analysis — they are displayed to the user and
-the residual state is derived on a best-effort basis.
-
-### 3. Derive the residual state (`src/core/play.rs`)
-
-```rust
-pub struct ResidualState {
-    /// Remaining cards for each player (N, E, S, W order).
+pub struct Position {
     pub hands: [Hand; 4],
-    /// The player who leads to the next trick (or the current player if mid-trick).
-    pub leader: Direction,
-    /// Suits of cards already played to the current trick (0-3 entries).
-    /// All zero if starting a new trick.
-    pub current_trick_suits: [Suit; 3],
-    /// Ranks of cards already played to the current trick.
-    pub current_trick_ranks: [Rank; 3],
-    /// Number of cards played to the current trick (0-3).
-    pub cards_in_trick: usize,
-    /// Tricks won by NS so far.
-    pub tricks_ns: u8,
-    /// Tricks won by EW so far.
-    pub tricks_ew: u8,
+    pub next_to_act: Direction,
+    pub current_trick: Vec<PlayedCard>,
 }
 
-pub fn derive_residual(
-    deal: &Deal,
-    trace: &PlayTrace,
-    trump: Strain,
-) -> Result<ResidualState, Error>;
+pub struct PlayedCard {
+    pub player: Direction,
+    pub card: Card,
+}
+
+pub enum PositionKind {
+    EntrySnapshot,
+    Runtime,
+}
 ```
 
-Algorithm:
+Validation:
 
-1. Start with `hands = deal.hands.clone()`, `leader = trace.opening_leader`.
-2. Process cards in play order, grouping into tricks (4 cards per trick).
-3. For each card: verify it exists in `hands[player]`, remove it.
-4. For each trick: determine the winner using follow-suit and trump rules.
-   Winner leads the next trick.
-5. After processing all complete tricks, record the partial trick state
-   (cards already played but trick not yet complete) in `current_trick_suits`/`ranks`.
-6. Track tricks won: increment `tricks_ns` or `tricks_ew` based on winner.
+- `current_trick.len() <= 3`.
+- `EntrySnapshot` requires equal hand counts and empty `current_trick`.
+- `Runtime` permits uneven hand counts.
+- `current_trick` players must follow clockwise order.
+- `next_to_act` must be the next clockwise player after the last `current_trick` player, or the trick leader when `current_trick` is empty.
 
-**Follow-suit and trick-winner logic:**
+### 2. Add Core Card Helpers (`src/core/deal.rs`)
 
-- The first card of a trick establishes the led suit.
-- Each subsequent player must follow suit if possible; otherwise may play any card.
-- If no trump is played, the highest card in the led suit wins.
-- If trump is played, the highest trump wins.
-- If the contract is NoTrump, there is no trump suit; the led suit always wins.
+Add narrow helpers needed by `Position` and `DDS` conversion.
 
-This logic is needed both for deriving the residual state (determining the next leader)
-and for validating the play trace.
+```rust
+impl Rank {
+    pub fn dds_rank(self) -> i32;
+}
 
-### 4. Call `SolveBoardPBN` (`src/dds/solver.rs`)
+impl Card {
+    pub fn to_pbn(self) -> String;
+}
 
-Extend `DdsSolver` with a mid-hand solve method:
+impl Hand {
+    pub fn has_suit(&self, suit: Suit) -> bool;
+}
+```
+
+Keep existing `Hand` storage unchanged.
+
+### 3. Add `SolveBoardPBN` `FFI` (`src/dds/ffi.rs`)
+
+Declare the `DDS` structs and function exactly as defined in `engine/dds/include/dll.h`.
+
+```rust
+#[repr(C)]
+pub struct futureTricks {
+    pub nodes: c_int,
+    pub cards: c_int,
+    pub suit: [c_int; 13],
+    pub rank: [c_int; 13],
+    pub equals: [c_int; 13],
+    pub score: [c_int; 13],
+}
+
+#[repr(C)]
+pub struct dealPBN {
+    pub trump: c_int,
+    pub first: c_int,
+    pub currentTrickSuit: [c_int; 3],
+    pub currentTrickRank: [c_int; 3],
+    pub remainCards: [c_char; 80],
+}
+
+pub fn SolveBoardPBN(
+    dlpbn: dealPBN,
+    target: c_int,
+    solutions: c_int,
+    mode: c_int,
+    futp: *mut futureTricks,
+    thrId: c_int,
+) -> c_int;
+```
+
+### 4. Convert `Position` To `dealPBN` (`src/dds/solver.rs`)
+
+Add a converter used by all `SolveBoardPBN` calls.
+
+Rules:
+
+- `dealPBN.trump = trump.dds_index()`.
+- `dealPBN.first = position.next_to_act.dds_index()`.
+- `dealPBN.currentTrickSuit` uses `Suit` indices `0..3`.
+- `dealPBN.currentTrickRank` uses ranks `2..14`.
+- Empty `currentTrickSuit` and `currentTrickRank` slots are `0`.
+- `dealPBN.remainCards` is a null-terminated `PBN` string built from remaining `hands`.
+- Reject `remainCards` strings with length `>= 80`.
+
+Use the existing `DDS_LOCK` around `SolveBoardPBN` calls.
+
+### 5. Solve One Position (`src/dds/solver.rs`)
+
+Add `DdsSolver::solve_position`.
 
 ```rust
 impl DdsSolver {
-    /// Solve from a mid-hand position. Returns the suggested cards and
-    /// the number of tricks the declaring side can win from this point.
-    pub fn solve_mid_hand(
-        state: &ResidualState,
+    pub fn solve_position(
+        position: &Position,
         trump: Strain,
-        leader: Direction,
-    ) -> Result<Vec<SuggestedCard>, Error>;
+    ) -> Result<Vec<CardResult>, Error>;
 }
 
-pub struct SuggestedCard {
+pub struct CardResult {
     pub card: Card,
-    /// Tricks for the declaring side if this card is played.
-    /// `None` if the target cannot be reached.
-    pub score: Option<u8>,
-    /// Whether this card is optimal.
+    pub tricks_for_side_to_act: u8,
     pub is_optimal: bool,
 }
 ```
 
-Implementation:
+Call `SolveBoardPBN` with:
 
-1. Convert `ResidualState.hands` to PBN format for `dealPBN.remainCards[80]`.
-2. Set `dealPBN.trump`: DDS trump index (0=S, 1=H, 2=D, 3=C, 4=NT).
-3. Set `dealPBN.first`: DDS direction index of the leader.
-4. Set `dealPBN.currentTrickSuit[0..cards_in_trick]` and `currentTrickRank[0..cards_in_trick]`.
-5. Call `SolveBoardPBN` with `target = -1` (find max tricks), `solutions = 2` (return all optimal cards), `mode = 1` (always search).
-6. The `futureTricks.score[i]` values are **from the current position** (we verified this semantics during Phase 1a review). Each entry gives the number of tricks the declaring side can win if that specific card is played now.
+- `target = -1`
+- `solutions = 3`
+- `mode = 1`
+- `thrId = 0`
 
-The `score` in `futureTricks` is relative to the declaring side (the side that is to play). For the output we display it as-is: "if you play this card, you can win N more tricks."
+Map `futureTricks` entries to `CardResult`. `is_optimal` is true when `tricks_for_side_to_act` equals the best returned score.
 
-### 5. Extend CLI (`src/cli/main.rs`)
+Equivalent lower cards encoded by `futureTricks.equals` may be ignored in the first implementation, but the limitation must be documented in code and tests should cover the primary returned card.
 
-Add new flags to `bridge solve`:
+### 6. Build A `Position Matrix` (`src/dds/solver.rs`)
+
+Add a method for clean residual snapshots.
 
 ```rust
-#[derive(Subcommand)]
-enum Command {
-    Solve {
-        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-        format: OutputFormat,
+pub fn solve_position_matrix(
+    snapshot: &Position,
+) -> Result<PositionMatrix, Error>;
 
-        /// Trump suit: S, H, D, C, or NT (required if Play tag is present)
-        #[arg(long)]
-        trump: Option<String>,
-
-        /// Declarer: N, E, S, or W (required if Play tag is present)
-        #[arg(long)]
-        declarer: Option<String>,
-    },
+pub struct PositionMatrix {
+    /// `data[strain][next_to_act]`.
+    pub data: [[u8; 4]; 5],
 }
 ```
 
-**Input contract for Phase 1b:**
+Requirements:
 
-The PBN record may now include an optional `Play` tag:
+- Validate `snapshot` as `EntrySnapshot`.
+- For each `next_to_act` in `N`, `E`, `S`, `W`, clone the snapshot and set `position.next_to_act`.
+- For each `Strain`, call `solve_position`.
+- Store the best `tricks_for_side_to_act` for that `next_to_act` and `Strain`.
+
+This matrix is for residual positions. It must not be described as a `declarer` matrix.
+
+### 7. Add State Advancement (`src/core/position.rs`)
+
+Add trial-play mechanics.
+
+```rust
+pub fn legal_cards(position: &Position) -> Vec<Card>;
+
+pub fn play_card(
+    position: &Position,
+    card: Card,
+    trump: Strain,
+) -> Result<Position, Error>;
+```
+
+Rules:
+
+- The card must be in `position.hands[position.next_to_act]`.
+- If `current_trick` is not empty and the player has the led suit, the card must follow suit.
+- Remove the card from the hand.
+- Append `PlayedCard` to `current_trick`.
+- If the trick now has `4` cards, determine the winner, clear `current_trick`, and set `next_to_act` to the winner.
+- Otherwise set `next_to_act` to the clockwise next player.
+
+This function is the shared basis for later `UI` undo and replay. The first implementation does not need persistent undo history.
+
+### 8. Add Residual Input Parsing (`src/core/pbn.rs`)
+
+Add a parser for short residual hands. Do not reuse `parse_deal_tag`, because that function requires `13` cards per hand.
+
+Proposed residual tag:
 
 ```pbn
-[Deal "N:..."]
-[Dealer "N"]
-[Vulnerable "None"]
-[Play "W:S6=S4=SJ=SQ=S3=S7=S9=SK"]
+[Position "N:QJ6.K65.J8.T9 -.J97.AT76.Q K5.T83.KQ9.A AT94.AQ4.-.KJ3"]
+[First "S"]
 ```
 
-When a `Play` tag is present:
-- `--trump` and `--declarer` are required. The CLI rejects the input if they are missing.
-- The opening leader is derived from `declarer` (the player to declarer's left: `declarer.next()`).
-- The play trace opening leader tag (first character of the Play value, e.g. `W:`) is cross-checked against the derived leader and a warning is emitted if they differ.
-- Parse the `Play` tag, validate, derive residual state, call `solve_mid_hand`.
+Rules:
 
-When no `Play` tag is present: behavior is identical to Phase 1a.
+- `Position` uses the same four-hand clockwise format as `Deal`.
+- Each hand may contain fewer than `13` cards.
+- All four hands must contain the same number of cards.
+- No card may appear twice.
+- `First` is required for residual input.
+- `current_trick` is empty for manual residual input.
 
-### 6. Output format
+The `Position` tag name is phase-local unless `phases/pbn-input-contract.md` is updated during implementation.
 
-When a play trace is provided, output extends the current format:
+### 9. Extend The `CLI` (`src/cli/main.rs`)
 
-**Text output example:**
+Keep existing full-deal behavior unchanged when the input contains `Deal`.
 
-```
-Trump: S  Declarer: N
-Tricks played: 4  Already won: NS 2  EW 1
-Leader: S  Cards in trick: 0
+Add residual position behavior when the input contains `Position`.
 
- N:  QJ6 K65 J8 T9
- E:  - J97 AT76 Q
- S:  K5 T83 KQ9 A
- W:  AT94 AQ4 - KJ3
+Required flag:
 
-Suggested plays for S:
-  SK  (8 tricks)
-  S5  (7 tricks)
-  H3  (6 tricks)
-  DQ  (8 tricks)
-  ...
+```rust
+#[arg(long)]
+trump: Option<String>
 ```
 
-**JSON output** extends the Phase 1a shape:
+Behavior:
+
+- `bridge solve` with `Deal` and no `Position` keeps Phase `1a` output.
+- `bridge solve --trump S` with `Position` prints continuation analysis for the supplied `First`.
+- `bridge solve --format json --trump S` with `Position` emits a `continuation` object.
+- `bridge solve --matrix` with `Position` emits the residual `next_to_act x strain` matrix.
+- Missing `--trump` for continuation analysis returns a clear error.
+
+The exact `CLI` flag names may be adjusted during implementation if `clap` ergonomics suggest a cleaner shape, but the distinction between `Position Matrix` and `Continuation Analysis` must remain explicit.
+
+### 10. Extra Step: Import `Play` Trace (`src/core/play.rs`)
+
+This step is part of `Phase 1b`, but it depends on the core `Position` pipeline.
+
+Add a `Play` parser that converts a complete `Deal + Play + trump` into a `Position`.
+
+```rust
+pub struct RawPlayTrace {
+    pub tag_leader: Option<Direction>,
+    pub cards: Vec<Card>,
+}
+
+pub fn parse_play_tag(value: &str) -> Result<RawPlayTrace, Error>;
+
+pub fn position_from_play_trace(
+    deal: &Deal,
+    opening_leader: Direction,
+    trump: Strain,
+    trace: &RawPlayTrace,
+) -> Result<PositionFromTrace, Error>;
+
+pub struct PositionFromTrace {
+    pub position: Position,
+    pub tricks_won_ns: u8,
+    pub tricks_won_ew: u8,
+    pub warnings: Vec<PlayWarning>,
+}
+```
+
+Parsing rules:
+
+- Accept an optional leading direction prefix such as `W:`.
+- Parse cards as a flat play-order sequence.
+- Whitespace and `=` may both separate cards.
+- Do not require the card count to be a multiple of `4`.
+
+Validation rules:
+
+- A played card must belong to the player who is to act.
+- A card may not be played twice.
+- Follow-suit violations are hard errors for imported `Play` traces.
+- If the optional `Play` prefix conflicts with the derived opening leader, return a warning or error before deriving the position. Prefer error in `CLI` mode.
+
+This import path may also track `tricks_won_ns` and `tricks_won_ew`, but the core solver must not require those counts.
+
+## Output
+
+### Text Continuation Output
+
+Example:
+
+```text
+Trump: S
+Next to act: S
+Current trick: empty
+
+Suggested plays:
+  SK  8 tricks for side to act  optimal
+  DQ  8 tricks for side to act  optimal
+  S5  7 tricks for side to act
+  H3  6 tricks for side to act
+```
+
+### Text Matrix Output
+
+Example:
+
+```text
+Position matrix: tricks for side to act
+      S  H  D  C NT
+  N   5  6  5  7  6
+  E   8  6  7  5  6
+  S   5  6  5  7  6
+  W   8  6  7  5  6
+```
+
+### `JSON` Continuation Output
 
 ```json
 {
-  "tricks": { ... },
-  "par": { ... },
   "continuation": {
-    "leader": "S",
-    "tricks_played": 4,
-    "won_ns": 2,
-    "won_ew": 1,
-    "cards_in_trick": 0,
-    "hands": {
-      "N": "QJ6.K65.J8.T9",
-      "E": "-.J97.AT76.Q",
-      "S": "K5.T83.KQ9.A",
-      "W": "AT94.AQ4.-.KJ3"
-    },
+    "trump": "S",
+    "next_to_act": "S",
+    "current_trick": [],
     "suggested": [
-      { "card": "SK", "score": 8, "optimal": true },
-      { "card": "S5", "score": 7, "optimal": false }
+      { "card": "SK", "tricks_for_side_to_act": 8, "optimal": true },
+      { "card": "S5", "tricks_for_side_to_act": 7, "optimal": false }
     ]
   }
 }
 ```
 
-### 7. DDS return-value semantics
+### `JSON` Matrix Output
 
-The DDS `futureTricks.score[i]` field is documented as "Target of maximum number of tricks"
-when `target = -1`. From DDS source analysis (the `SolveBoard` function computes tricks
-the declaring side can win from the current position, not total tricks for the full deal),
-the returned values are **tricks from the current position**.
+```json
+{
+  "position_matrix": {
+    "semantics": "tricks_for_side_to_act",
+    "rows": ["N", "E", "S", "W"],
+    "columns": ["S", "H", "D", "C", "NT"],
+    "values": {
+      "N": { "S": 5, "H": 6, "D": 5, "C": 7, "NT": 6 },
+      "E": { "S": 8, "H": 6, "D": 7, "C": 5, "NT": 6 },
+      "S": { "S": 5, "H": 6, "D": 5, "C": 7, "NT": 6 },
+      "W": { "S": 8, "H": 6, "D": 7, "C": 5, "NT": 6 }
+    }
+  }
+}
+```
 
-Since we already track `tricks_ns` and `tricks_ew` in the residual state, the total tricks
-the declaring side will ultimately win is `tricks_already_won + score[i]`. Both the
-per-card score and the already-won counts are displayed to the user.
+## Error Handling
 
-A unit test in `tests/dds_integration.rs` will verify this semantics by feeding a known
-position and asserting the returned futureTricks values against expected results from
-the DDS example files.
-
-### 8. Error handling additions
-
-New error variants for `src/core/error.rs`:
+Add or reuse error variants in `src/core/error.rs`.
 
 ```rust
 #[error("invalid trump '{0}'; expected one of: S, H, D, C, NT")]
 InvalidTrump(String),
 
-#[error("invalid declarer '{0}'; expected one of: N, E, S, W")]
-InvalidDeclarer(String),
+#[error("invalid first player '{0}'; expected one of: N, E, S, W")]
+InvalidFirst(String),
 
-#[error("Play tag present but --trump and --declarer are required for mid-hand analysis")]
-MissingContractFlags,
+#[error("invalid position: {0}")]
+InvalidPosition(String),
 
-#[error("play trace validation error: {0}")]
-PlayValidation(String),
-
-#[error("play trace warning: {0}")]
-PlayWarning(String),
+#[error("invalid play trace: {0}")]
+InvalidPlayTrace(String),
 ```
+
+Warnings should be returned as typed values where possible. Do not model warnings as `Error` variants unless they must stop execution.
 
 ## Verification
 
 ### Automated (`cargo test`)
 
-- `core::play` unit tests:
-  - Round-trip: parse a PBN `Play` tag, verify card count matches.
-  - Opening leader derived correctly from declarer.
-  - Residual state after 1, 2, 4 complete tricks: remaining cards, next leader, tricks won.
-  - Partial trick: 1-3 cards played, residual state shows correct current trick info.
-  - Follow-suit validation: correct play passes, violation produces warning.
-  - Card ownership error: card not held by claimed player produces hard error.
-  - Duplicate card error: same card twice produces hard error.
+- `core::position` unit tests:
+  - Valid `EntrySnapshot` with equal hand counts passes.
+  - Unequal manual residual hands fail.
+  - `Runtime` position with `current_trick` length `1`, `2`, and `3` passes.
+  - `next_to_act` validation catches out-of-order current trick states.
+  - `legal_cards` enforces follow suit.
+  - `play_card` advances within a trick.
+  - `play_card` clears a completed trick and sets the winner as `next_to_act`.
 
-- `dds` integration test:
-  - Use a known deal from `engine/dds/examples/hands.cpp` with a known play trace.
-  - Derive residual state and call `solve_mid_hand`.
-  - Assert the returned scores match expected values from the DDS example.
-  - Verify the trick continuation semantics (already-won + future = total).
+- `dds` integration tests:
+  - `solve_position` on a full-deal first-trick position matches known `DDS` expectations.
+  - `solve_position` with `current_trick` populated succeeds.
+  - `solve_position_matrix` returns the same values as the Phase `1a` table when started from a full deal and using equivalent first-player semantics where applicable.
+  - `solutions = 3` returns non-optimal legal cards as well as optimal cards.
 
-### Manual (developer performs)
+- `pbn` parser tests:
+  - Residual `Position` tag parses short hands.
+  - Duplicate cards fail.
+  - Unequal hand sizes fail for manual residual input.
+  - `First` is required for residual input.
 
-- `bridge solve --trump S --declarer N < examples/mid-hand.pbn` prints continuation analysis.
-- JSON output includes `continuation` block.
-- Missing `--trump` or `--declarer` when `Play` tag is present produces a clear error.
-- An invalid play trace (card not in hand) prints an error and exits non-zero.
+- Extra `play` tests:
+  - `Play` tag parses flat sequences separated by whitespace and `=`.
+  - Incomplete final trick derives `current_trick`.
+  - Completed final trick derives an empty `current_trick` and winner as `next_to_act`.
+  - Duplicate and ownership errors fail.
+
+### Manual Checks
+
+- `bridge solve < full-deal.pbn` keeps the Phase `1a` output.
+- `bridge solve --matrix < residual-position.pbn` prints a residual `next_to_act x strain` matrix.
+- `bridge solve --trump S < residual-position.pbn` prints legal continuation cards.
+- `bridge solve --format json --trump S < residual-position.pbn` emits a `continuation` object.
+- Invalid residual input exits non-zero with a clear error.
+
+## Implementation Order
+
+1. Add `Position` types and validation.
+2. Add `DDS` `FFI` declarations for `SolveBoardPBN`.
+3. Implement `Position` to `dealPBN` conversion.
+4. Implement `DdsSolver::solve_position`.
+5. Implement `legal_cards` and `play_card`.
+6. Implement `solve_position_matrix`.
+7. Add residual `PBN` parsing.
+8. Extend `CLI` output for residual continuation and matrix modes.
+9. Add tests for each completed layer.
+10. Add the extra `Play` trace import path after the position pipeline is stable.
+
+Work should begin only after this revised plan is reviewed and confirmed.
