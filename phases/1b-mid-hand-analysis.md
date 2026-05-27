@@ -16,6 +16,8 @@ This phase is centered on the current position, not on how that position was rea
 - Manual residual input starts only from a clean trick boundary: all four hands have the same card count and `current_trick` is empty.
 - Runtime trial play must support `current_trick` lengths from `0` to `3`, because hands become uneven during a trick.
 - `Play` trace import is an extra entry path. It derives a `Position`, then reuses the same analysis pipeline.
+- Imported `Play` traces warn on follow-suit violations and continue when possible. Interactive `play_card` rejects follow-suit violations as hard errors.
+- `Position Matrix` output must label row semantics as `next_to_act`, not `declarer`.
 
 These decisions keep the library model independent from contract scoring. This matters because residual positions often lack the earlier trick history, so total tricks and score may be unknowable and are not required for continuation analysis.
 
@@ -158,6 +160,8 @@ Add narrow helpers needed by `Position` and `DDS` conversion.
 
 ```rust
 impl Rank {
+    /// Return the `DDS` rank value used in `currentTrickRank`: `2..14`.
+    /// This is distinct from `bit_index()`, which uses `A=0` for bit storage.
     pub fn dds_rank(self) -> i32;
 }
 
@@ -218,9 +222,20 @@ Rules:
 - `dealPBN.currentTrickRank` uses ranks `2..14`.
 - Empty `currentTrickSuit` and `currentTrickRank` slots are `0`.
 - `dealPBN.remainCards` is a null-terminated `PBN` string built from remaining `hands`.
+- `dealPBN.remainCards` must start with `<first>:`. The `<first>` value controls how the four hand strings map to `N`, `E`, `S`, and `W`.
+- For the first implementation, serialize `remainCards` with `<first> = position.next_to_act`, and emit the four hands clockwise from that direction.
+- Hand strings use suit order `S.H.D.C`, and ranks within each suit use descending order `A K Q J T 9 8 7 6 5 4 3 2`.
 - Reject `remainCards` strings with length `>= 80`.
 
 Use the existing `DDS_LOCK` around `SolveBoardPBN` calls.
+
+Add a reusable serializer rather than overloading complete-deal serialization:
+
+```rust
+pub fn hands_to_dds_pbn(hands: &[Hand; 4], first_hand: Direction) -> String;
+```
+
+This mirrors the existing `deal_to_dds_pbn` behavior, but it works for residual `Position` hands that may contain fewer than `13` cards per player.
 
 ### 5. Solve One Position (`src/dds/solver.rs`)
 
@@ -310,6 +325,7 @@ Proposed residual tag:
 ```pbn
 [Position "N:QJ6.K65.J8.T9 -.J97.AT76.Q K5.T83.KQ9.A AT94.AQ4.-.KJ3"]
 [First "S"]
+[Trump "S"]
 ```
 
 Rules:
@@ -319,6 +335,7 @@ Rules:
 - All four hands must contain the same number of cards.
 - No card may appear twice.
 - `First` is required for residual input.
+- `Trump` is optional.
 - `current_trick` is empty for manual residual input.
 
 The `Position` tag name is phase-local unless `phases/pbn-input-contract.md` is updated during implementation.
@@ -342,7 +359,10 @@ Behavior:
 - `bridge solve --trump S` with `Position` prints continuation analysis for the supplied `First`.
 - `bridge solve --format json --trump S` with `Position` emits a `continuation` object.
 - `bridge solve --matrix` with `Position` emits the residual `next_to_act x strain` matrix.
-- Missing `--trump` for continuation analysis returns a clear error.
+- Continuation analysis may read `trump` from `--trump` or an optional `Trump` tag.
+- `--trump` overrides `Trump` when both are present.
+- Missing both `--trump` and `Trump` for continuation analysis returns a clear error.
+- The residual matrix mode does not require `trump`, because it evaluates all strains.
 
 The exact `CLI` flag names may be adjusted during implementation if `clap` ergonomics suggest a cleaner shape, but the distinction between `Position Matrix` and `Continuation Analysis` must remain explicit.
 
@@ -386,7 +406,7 @@ Validation rules:
 
 - A played card must belong to the player who is to act.
 - A card may not be played twice.
-- Follow-suit violations are hard errors for imported `Play` traces.
+- Follow-suit violations are warnings for imported `Play` traces.
 - If the optional `Play` prefix conflicts with the derived opening leader, return a warning or error before deriving the position. Prefer error in `CLI` mode.
 
 This import path may also track `tricks_won_ns` and `tricks_won_ew`, but the core solver must not require those counts.
@@ -443,7 +463,8 @@ Position matrix: tricks for side to act
 ```json
 {
   "position_matrix": {
-    "semantics": "tricks_for_side_to_act",
+    "row_semantics": "next_to_act",
+    "value_semantics": "tricks_for_side_to_act",
     "rows": ["N", "E", "S", "W"],
     "columns": ["S", "H", "D", "C", "NT"],
     "values": {
@@ -500,12 +521,15 @@ Warnings should be returned as typed values where possible. Do not model warning
   - Duplicate cards fail.
   - Unequal hand sizes fail for manual residual input.
   - `First` is required for residual input.
+  - Optional `Trump` tag parses.
+  - `--trump` overrides `Trump` for continuation analysis.
 
 - Extra `play` tests:
   - `Play` tag parses flat sequences separated by whitespace and `=`.
   - Incomplete final trick derives `current_trick`.
   - Completed final trick derives an empty `current_trick` and winner as `next_to_act`.
   - Duplicate and ownership errors fail.
+  - Follow-suit violations return warnings and still derive a best-effort `Position`.
 
 ### Manual Checks
 
