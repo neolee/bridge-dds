@@ -1,4 +1,4 @@
-use super::deal::{Board, Card, Deal, Direction, Hand, Rank, Suit, Vulnerability};
+use super::deal::{Board, Card, Deal, Direction, Hand, Rank, Strain, Suit, Vulnerability};
 use super::error::Error;
 
 /// Parse a single PBN record into a `Board`.
@@ -240,6 +240,181 @@ fn hand_to_pbn(hand: &Hand) -> String {
         })
         .collect();
     suit_strs.join(".")
+}
+
+/// Serialize four hands into the PBN string format expected by
+/// `dealPBN.remainCards`. Emits hands clockwise from `first_hand`,
+/// suit order `S.H.D.C`, descending ranks within each suit.
+pub fn hands_to_dds_pbn(hands: &[Hand; 4], first_hand: Direction) -> String {
+    let mut parts = Vec::with_capacity(4);
+    for i in 0..4 {
+        let idx = (first_hand.dds_index() + i) % 4;
+        parts.push(hand_to_pbn(&hands[idx]));
+    }
+    format!(
+        "{}:{} {} {} {}",
+        first_hand.as_char(),
+        parts[0],
+        parts[1],
+        parts[2],
+        parts[3]
+    )
+}
+
+/// Parsed residual position from a PBN record.
+#[derive(Debug)]
+pub struct ResidualInput {
+    pub hands: [Hand; 4],
+    pub first: Option<Direction>,
+    pub trump: Option<Strain>,
+    pub current_trick: Vec<(Direction, Card)>,
+}
+
+/// Parse a residual PBN record containing `Position`, `First`, and optional `Trump`/
+/// Parse a residual PBN record containing `Position`, `First`, optional `Trump`
+/// and `CurrentTrick` tags.
+pub fn parse_residual_record(input: &str) -> Result<ResidualInput, Error> {
+    let mut hands: Option<[Hand; 4]> = None;
+    let mut first: Option<Direction> = None;
+    let mut trump: Option<Strain> = None;
+    let mut current_trick: Vec<(Direction, Card)> = vec![];
+
+    for line in input.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (tag, value) = parse_tag_line(line)?;
+        match tag {
+            "Position" => {
+                if hands.is_some() {
+                    return Err(Error::DuplicatePbnTag("Position"));
+                }
+                hands = Some(parse_residual_hands(value)?);
+            }
+            "First" => {
+                if first.is_some() {
+                    return Err(Error::DuplicatePbnTag("First"));
+                }
+                first = Some(parse_first_tag(value)?);
+            }
+            "Trump" => {
+                if trump.is_some() {
+                    return Err(Error::DuplicatePbnTag("Trump"));
+                }
+                trump = Some(parse_trump_tag(value)?);
+            }
+            "CurrentTrick" => {
+                for entry in value.split_whitespace() {
+                    if entry.len() < 3 || !entry.contains(':') {
+                        return Err(Error::PbnParse(format!(
+                            "invalid CurrentTrick entry '{}'; expected format N:SA",
+                            entry
+                        )));
+                    }
+                    let colon = entry.find(':').unwrap();
+                    let dir_str = &entry[..colon];
+                    let card_str = &entry[colon + 1..];
+                    let dir = Direction::from_char(dir_str.chars().next().unwrap_or(' '))
+                        .ok_or_else(|| {
+                            Error::PbnParse(format!(
+                                "invalid direction in CurrentTrick: {}",
+                                dir_str
+                            ))
+                        })?;
+                    if card_str.len() != 2 {
+                        return Err(Error::PbnParse(format!(
+                            "invalid card in CurrentTrick: {}",
+                            card_str
+                        )));
+                    }
+                    let mut chars = card_str.chars();
+                    let suit = Suit::from_char(chars.next().unwrap()).ok_or_else(|| {
+                        Error::PbnParse(format!("invalid suit in CurrentTrick: {}", card_str))
+                    })?;
+                    let rank = Rank::from_char(chars.next().unwrap()).ok_or_else(|| {
+                        Error::PbnParse(format!("invalid rank in CurrentTrick: {}", card_str))
+                    })?;
+                    current_trick.push((dir, Card::new(suit, rank)));
+                }
+            }
+            // Unknown tags are ignored.
+            _ => {}
+        }
+    }
+
+    let hands = hands.ok_or(Error::MissingPbnTag("Position"))?;
+
+    // Validate CurrentTrick: each card must be held by the claimed player.
+    for (player, card) in &current_trick {
+        if !hands[player.dds_index()].contains(*card) {
+            return Err(Error::InvalidPosition(format!(
+                "CurrentTrick: {:?} does not hold {}{}",
+                player,
+                card.suit.as_char(),
+                card.rank.as_char()
+            )));
+        }
+    }
+
+    Ok(ResidualInput {
+        hands,
+        first,
+        trump,
+        current_trick,
+    })
+}
+
+/// Parse residual hands: same four-hand clockwise format as Deal, but each
+/// hand may contain fewer than 13 cards. All hands must have equal count
+/// (only clean trick boundaries are accepted via PBN input).
+fn parse_residual_hands(value: &str) -> Result<[Hand; 4], Error> {
+    let colon_pos = value
+        .find(':')
+        .ok_or_else(|| Error::PbnParse(format!("missing ':' in Position tag: {}", value)))?;
+    if colon_pos != 1 {
+        return Err(Error::InvalidDeal(
+            "Position <first> must be a single direction letter before ':'".into(),
+        ));
+    }
+    let first = Direction::from_char(value.chars().next().unwrap())
+        .ok_or_else(|| Error::InvalidDeal(format!("invalid <first> direction: {}", &value[..1])))?;
+
+    let hands_str = &value[colon_pos + 1..];
+    let hand_strs: Vec<&str> = hands_str.split_whitespace().collect();
+    if hand_strs.len() != 4 {
+        return Err(Error::InvalidDeal(format!(
+            "expected 4 hands in Position, got {}",
+            hand_strs.len()
+        )));
+    }
+
+    let mut hands = [Hand::empty(); 4];
+
+    for (i, hand_str) in hand_strs.iter().enumerate() {
+        let dest_idx = (first.dds_index() + i) % 4;
+        let cards = parse_hand_pbn(hand_str)?;
+        hands[dest_idx] = Hand::from_cards(&cards)?;
+    }
+
+    Ok(hands)
+}
+
+fn parse_first_tag(value: &str) -> Result<Direction, Error> {
+    let trimmed = value.trim();
+    if trimmed.len() != 1 {
+        return Err(Error::InvalidFirst(format!(
+            "'{}' is not a valid direction",
+            value
+        )));
+    }
+    Direction::from_char(trimmed.chars().next().unwrap())
+        .ok_or_else(|| Error::InvalidFirst(format!("invalid direction: '{}'", value)))
+}
+
+fn parse_trump_tag(value: &str) -> Result<Strain, Error> {
+    Strain::from_char(value.trim().chars().next().unwrap_or(' '))
+        .ok_or_else(|| Error::InvalidTrump(format!("'{}' is not a valid trump", value)))
 }
 
 #[cfg(test)]

@@ -2,10 +2,11 @@ use std::ffi::CStr;
 use std::sync::{Mutex, Once};
 
 use super::ffi;
-use crate::core::deal::{Deal, Direction, Vulnerability};
+use crate::core::deal::{Card, Deal, Direction, Rank, Strain, Suit, Vulnerability};
 use crate::core::error::Error;
 use crate::core::par::ParResult;
 use crate::core::pbn;
+use crate::core::position::{Position, PositionKind};
 use crate::core::tricks::TricksMatrix;
 
 static DDS_INIT: Once = Once::new();
@@ -14,6 +15,18 @@ static DDS_INIT: Once = Once::new();
 /// (transposition tables, thread pools) that is not safe for concurrent
 /// access from multiple Rust threads.
 static DDS_LOCK: Mutex<()> = Mutex::new(());
+
+/// Result for one legal card from `solve_position`.
+pub struct CardResult {
+    pub card: Card,
+    pub tricks_for_side_to_act: u8,
+    pub is_optimal: bool,
+}
+
+/// Position matrix: `data[strain][next_to_act]` = tricks for the side to act.
+pub struct PositionMatrix {
+    pub data: [[u8; 4]; 5],
+}
 
 pub struct DdsSolver;
 
@@ -97,6 +110,109 @@ impl DdsSolver {
             score: par.score,
             contracts,
         })
+    }
+
+    /// Evaluate all legal continuations from a position.
+    pub fn solve_position(position: &Position, trump: Strain) -> Result<Vec<CardResult>, Error> {
+        let _guard = DDS_LOCK.lock().unwrap();
+
+        let remain = pbn::hands_to_dds_pbn(&position.hands, position.next_to_act);
+        if remain.len() >= 80 {
+            return Err(Error::DdsBufferTooLong {
+                field: "dealPBN.remainCards",
+                len: remain.len(),
+                max: 79,
+            });
+        }
+
+        let mut dds_deal: ffi::dealPBN = unsafe { std::mem::zeroed() };
+        dds_deal.trump = trump.dds_index() as i32;
+        dds_deal.first = position.next_to_act.dds_index() as i32;
+
+        for (i, played) in position.current_trick.iter().enumerate() {
+            dds_deal.currentTrickSuit[i] = played.card.suit.dds_index() as i32;
+            dds_deal.currentTrickRank[i] = played.card.rank.dds_rank();
+        }
+
+        let remain_bytes = remain.as_bytes();
+        for (i, &b) in remain_bytes.iter().enumerate() {
+            dds_deal.remainCards[i] = b as std::os::raw::c_char;
+        }
+
+        let mut fut: ffi::futureTricks = unsafe { std::mem::zeroed() };
+        let rc = unsafe { ffi::SolveBoardPBN(dds_deal, -1, 3, 1, &mut fut, 0) };
+        if rc != 1 {
+            let msg = Self::error_message(rc);
+            return Err(Error::Dds(msg));
+        }
+
+        // Map futureTricks to CardResult, expanding equivalent cards.
+        let mut results = Vec::new();
+        let best_score = (0..fut.cards as usize)
+            .map(|i| fut.score[i])
+            .max()
+            .unwrap_or(-1);
+
+        for i in 0..fut.cards as usize {
+            let suit = Suit::from_dds_index(fut.suit[i] as usize)
+                .ok_or_else(|| Error::Dds(format!("invalid suit index: {}", fut.suit[i])))?;
+            let rank = Rank::from_dds_score(fut.rank[i] as u8)
+                .ok_or_else(|| Error::Dds(format!("invalid rank value: {}", fut.rank[i])))?;
+            let score = fut.score[i] as u8;
+            let optimal = fut.score[i] == best_score;
+
+            // Primary card.
+            results.push(CardResult {
+                card: Card::new(suit, rank),
+                tricks_for_side_to_act: score,
+                is_optimal: optimal,
+            });
+
+            // Expand equivalent lower-ranked cards from the equals bitmask.
+            let equals = fut.equals[i];
+            if equals != 0 {
+                for bit in 2..=14 {
+                    if (equals >> bit) & 1 != 0 {
+                        if let Some(eq_rank) = Rank::from_dds_score(bit as u8) {
+                            if eq_rank < rank {
+                                results.push(CardResult {
+                                    card: Card::new(suit, eq_rank),
+                                    tricks_for_side_to_act: score,
+                                    is_optimal: optimal,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Evaluate a clean residual snapshot across all `next_to_act` and strain values.
+    pub fn solve_position_matrix(snapshot: &Position) -> Result<PositionMatrix, Error> {
+        snapshot.validate(PositionKind::EntrySnapshot)?;
+
+        let mut data = [[0u8; 4]; 5];
+        #[allow(clippy::needless_range_loop)]
+        for next_idx in 0..4 {
+            let next = Direction::from_dds_index(next_idx).unwrap();
+            let mut pos = snapshot.clone();
+            pos.next_to_act = next;
+
+            for strain in Strain::all() {
+                let results = Self::solve_position(&pos, strain)?;
+                let best = results
+                    .iter()
+                    .map(|r| r.tricks_for_side_to_act)
+                    .max()
+                    .unwrap_or(0);
+                data[strain.dds_index()][next_idx] = best;
+            }
+        }
+
+        Ok(PositionMatrix { data })
     }
 
     /// Convert a DDS return code to a human-readable string.

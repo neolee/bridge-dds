@@ -143,6 +143,46 @@ impl Rank {
         }
     }
 
+    /// Convert from DDS rank value (2..14) back to Rank.
+    pub fn from_dds_score(v: u8) -> Option<Rank> {
+        match v {
+            2 => Some(Rank::Two),
+            3 => Some(Rank::Three),
+            4 => Some(Rank::Four),
+            5 => Some(Rank::Five),
+            6 => Some(Rank::Six),
+            7 => Some(Rank::Seven),
+            8 => Some(Rank::Eight),
+            9 => Some(Rank::Nine),
+            10 => Some(Rank::Ten),
+            11 => Some(Rank::Jack),
+            12 => Some(Rank::Queen),
+            13 => Some(Rank::King),
+            14 => Some(Rank::Ace),
+            _ => None,
+        }
+    }
+
+    /// Return the DDS rank value used in `currentTrickRank`: 2 (Deuce)..14 (Ace).
+    /// This is distinct from `bit_index()`, which uses A=0 for bit storage.
+    pub fn dds_rank(self) -> i32 {
+        match self {
+            Rank::Two => 2,
+            Rank::Three => 3,
+            Rank::Four => 4,
+            Rank::Five => 5,
+            Rank::Six => 6,
+            Rank::Seven => 7,
+            Rank::Eight => 8,
+            Rank::Nine => 9,
+            Rank::Ten => 10,
+            Rank::Jack => 11,
+            Rank::Queen => 12,
+            Rank::King => 13,
+            Rank::Ace => 14,
+        }
+    }
+
     /// Convert to a bit position within a suit (0=Ace, 1=King, ..., 12=Two).
     pub fn bit_index(self) -> usize {
         match self {
@@ -195,6 +235,11 @@ pub struct Card {
 impl Card {
     pub fn new(suit: Suit, rank: Rank) -> Self {
         Card { suit, rank }
+    }
+
+    /// Return the two-character PBN string for this card, e.g. `"SK"`.
+    pub fn to_pbn(self) -> String {
+        format!("{}{}", self.suit.as_char(), self.rank.as_char())
     }
 }
 
@@ -397,6 +442,13 @@ impl Hand {
     pub fn contains(&self, card: Card) -> bool {
         let pos = card.suit.dds_index() * 13 + card.rank.bit_index();
         (self.0 >> pos) & 1 != 0
+    }
+
+    /// Whether the hand contains any card of the given suit.
+    pub fn has_suit(&self, suit: Suit) -> bool {
+        let shift = suit.dds_index() * 13;
+        let suit_mask: u64 = 0x1FFF << shift;
+        (self.0 & suit_mask) != 0
     }
 
     pub fn len(&self) -> usize {

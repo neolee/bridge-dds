@@ -2,6 +2,7 @@ pub mod deal;
 pub mod error;
 pub mod par;
 pub mod pbn;
+pub mod position;
 pub mod tricks;
 
 pub use deal::Board;

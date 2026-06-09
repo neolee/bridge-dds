@@ -33,6 +33,18 @@ pub enum Error {
     #[error("invalid vulnerability '{0}'; expected one of: none, ns, ew, both")]
     InvalidVulnerability(String),
 
+    #[error("invalid trump '{0}'; expected one of: S, H, D, C, NT")]
+    InvalidTrump(String),
+
+    #[error("invalid first player '{0}'; expected one of: N, E, S, W")]
+    InvalidFirst(String),
+
+    #[error("invalid position: {0}")]
+    InvalidPosition(String),
+
+    #[error("invalid play trace: {0}")]
+    InvalidPlayTrace(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

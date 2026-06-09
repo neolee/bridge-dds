@@ -28,6 +28,27 @@ pub struct parResultsDealer {
     pub contracts: [[c_char; 10]; 10],
 }
 
+/// Result from `SolveBoardPBN`. Each entry describes one legal card and its score.
+#[repr(C)]
+pub struct futureTricks {
+    pub nodes: c_int,
+    pub cards: c_int,
+    pub suit: [c_int; 13],
+    pub rank: [c_int; 13],
+    pub equals: [c_int; 13],
+    pub score: [c_int; 13],
+}
+
+/// Mid-hand position input for `SolveBoardPBN`.
+#[repr(C)]
+pub struct dealPBN {
+    pub trump: c_int,
+    pub first: c_int,
+    pub currentTrickSuit: [c_int; 3],
+    pub currentTrickRank: [c_int; 3],
+    pub remainCards: [c_char; 80],
+}
+
 extern "C" {
     /// Auto-configure threads. Call once at startup. 0 = let DDS decide.
     pub fn SetMaxThreads(userThreads: c_int);
@@ -47,4 +68,16 @@ extern "C" {
 
     /// Convert a DDS return code to a human-readable string.
     pub fn ErrorMessage(code: c_int, line: *mut c_char);
+
+    /// Solve a single position (fresh or mid-hand) with PBN input.
+    /// `target`: -1 = find max tricks. `solutions`: 1, 2, or 3.
+    /// `mode`: 0 = fast, 1 = always search. `thrId`: thread index.
+    pub fn SolveBoardPBN(
+        dlpbn: dealPBN,
+        target: c_int,
+        solutions: c_int,
+        mode: c_int,
+        futp: *mut futureTricks,
+        thrId: c_int,
+    ) -> c_int;
 }

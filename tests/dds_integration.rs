@@ -100,3 +100,150 @@ fn test_deal(idx: usize) {
         );
     }
 }
+
+// --- Phase 1b: position analysis ---
+
+use bridge_dds::core::deal::{Card, Direction, Hand, Rank, Strain, Suit};
+use bridge_dds::core::pbn;
+use bridge_dds::core::position::{PlayedCard, Position};
+
+fn one_suit_hand(suit: Suit) -> Hand {
+    Hand::from_cards(&[
+        Card::new(suit, Rank::Ace),
+        Card::new(suit, Rank::King),
+        Card::new(suit, Rank::Queen),
+        Card::new(suit, Rank::Jack),
+    ])
+    .unwrap()
+}
+
+fn four_suit_position() -> Position {
+    Position {
+        hands: [
+            one_suit_hand(Suit::Spades),
+            one_suit_hand(Suit::Hearts),
+            one_suit_hand(Suit::Diamonds),
+            one_suit_hand(Suit::Clubs),
+        ],
+        next_to_act: Direction::North,
+        current_trick: vec![],
+    }
+}
+
+#[test]
+fn test_position_clean_trick() {
+    DdsSolver::init();
+    let pos = four_suit_position();
+    let results = DdsSolver::solve_position(&pos, Strain::NoTrump).unwrap();
+    // N has only spades, leads with NT. All 4 spade cards returned.
+    assert_eq!(results.len(), 4);
+    for r in &results {
+        assert_eq!(r.card.suit, Suit::Spades);
+        assert_eq!(r.tricks_for_side_to_act, 4);
+    }
+}
+
+#[test]
+fn test_position_matrix() {
+    DdsSolver::init();
+    let pos = four_suit_position();
+    let pm = DdsSolver::solve_position_matrix(&pos).unwrap();
+    // Each cell should be a valid trick count (0..=4 for 4 cards each).
+    for strain in Strain::all() {
+        for next_idx in 0..4 {
+            let v = pm.data[strain.dds_index()][next_idx];
+            assert!(v <= 4, "strain {:?} next {}: got {}", strain, next_idx, v);
+        }
+    }
+    // When a player leads their own suit, they should get at least some tricks.
+    for i in 0..4 {
+        let strain = Strain::from_dds_index(i).unwrap();
+        assert!(pm.data[i][i] > 0, "own suit {:?}: got 0", strain);
+    }
+}
+
+#[test]
+fn test_position_mid_trick_1_card() {
+    DdsSolver::init();
+    let pos = Position {
+        hands: [
+            one_suit_hand(Suit::Spades),
+            one_suit_hand(Suit::Hearts),
+            one_suit_hand(Suit::Diamonds),
+            one_suit_hand(Suit::Clubs),
+        ],
+        next_to_act: Direction::East,
+        current_trick: vec![PlayedCard {
+            player: Direction::North,
+            card: Card::new(Suit::Spades, Rank::Ace),
+        }],
+    };
+    let results = DdsSolver::solve_position(&pos, Strain::NoTrump).unwrap();
+    // E is next, holds hearts only. N's SA wins this trick.
+    for r in &results {
+        assert_eq!(r.card.suit, Suit::Hearts);
+    }
+}
+
+#[test]
+fn test_position_mid_trick_3_cards() {
+    DdsSolver::init();
+    let pos = Position {
+        hands: [
+            one_suit_hand(Suit::Spades),
+            one_suit_hand(Suit::Hearts),
+            one_suit_hand(Suit::Diamonds),
+            one_suit_hand(Suit::Clubs),
+        ],
+        next_to_act: Direction::West,
+        current_trick: vec![
+            PlayedCard {
+                player: Direction::North,
+                card: Card::new(Suit::Spades, Rank::Ace),
+            },
+            PlayedCard {
+                player: Direction::East,
+                card: Card::new(Suit::Hearts, Rank::Ace),
+            },
+            PlayedCard {
+                player: Direction::South,
+                card: Card::new(Suit::Diamonds, Rank::Ace),
+            },
+        ],
+    };
+    let results = DdsSolver::solve_position(&pos, Strain::NoTrump).unwrap();
+    // W is last, holds clubs only. N's SA wins.
+    for r in &results {
+        assert_eq!(r.card.suit, Suit::Clubs);
+    }
+}
+
+#[test]
+fn test_residual_pbn_parsing() {
+    let input = "\
+[Position \"N:AKQJ... .AKQJ.. ..AKQJ. ...AKQJ\"]\n[First \"N\"]\n[Trump \"NT\"]\n";
+    let res = pbn::parse_residual_record(input).unwrap();
+    assert_eq!(res.first.unwrap(), Direction::North);
+    assert_eq!(res.trump.unwrap(), Strain::NoTrump);
+    assert_eq!(res.hands[0].len(), 4); // N has 4 spades
+    assert_eq!(res.hands[1].len(), 4); // E has 4 hearts
+}
+
+#[test]
+fn test_residual_pbn_with_current_trick() {
+    let input = "\
+[Position \"N:AKQJ... .AKQJ.. ..AKQJ. ...AKQJ\"]\n[First \"E\"]\n[Trump \"NT\"]\n[CurrentTrick \"N:SA\"]\n";
+    let res = pbn::parse_residual_record(input).unwrap();
+    assert_eq!(res.first.unwrap(), Direction::East);
+    assert_eq!(res.current_trick.len(), 1);
+    assert_eq!(res.current_trick[0].0, Direction::North);
+    assert_eq!(res.current_trick[0].1, Card::new(Suit::Spades, Rank::Ace));
+}
+
+#[test]
+fn test_residual_pbn_current_trick_invalid_card() {
+    let input = "\
+[Position \"N:AKQJ... .AKQJ.. ..AKQJ. ...AKQJ\"]\n[First \"W\"]\n[Trump \"NT\"]\n[CurrentTrick \"N:SA E:S2\"]\n";
+    let err = pbn::parse_residual_record(input).unwrap_err();
+    assert!(err.to_string().contains("East does not hold S2"));
+}
