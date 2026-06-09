@@ -247,3 +247,70 @@ fn test_residual_pbn_current_trick_invalid_card() {
     let err = pbn::parse_residual_record(input).unwrap_err();
     assert!(err.to_string().contains("East does not hold S2"));
 }
+
+// --- Phase 1b: Play trace import ---
+
+use bridge_dds::core::play;
+
+#[test]
+fn test_parse_play_tag_with_prefix() {
+    let (leader, cards) = play::parse_play_tag("W:S6=S4=SJ=SQ").unwrap();
+    assert_eq!(leader, Some(Direction::West));
+    assert_eq!(cards.len(), 4);
+}
+
+#[test]
+fn test_parse_play_tag_without_prefix() {
+    let (leader, cards) = play::parse_play_tag("S6=S4=SJ=SQ").unwrap();
+    assert_eq!(leader, None);
+    assert_eq!(cards.len(), 4);
+}
+
+#[test]
+fn test_parse_play_tag_multi_trick() {
+    let (leader, cards) = play::parse_play_tag("N:SA=HK=DQ=CJ S2=H3=D4=C5").unwrap();
+    assert_eq!(leader, Some(Direction::North));
+    assert_eq!(cards.len(), 8);
+}
+
+#[test]
+fn test_play_trace_import_one_card() {
+    DdsSolver::init();
+    // Use the DDS example deal. E leads S3 with spades trump.
+    let deal = pbn::parse_deal_tag(PBN[0]).unwrap();
+    let (_, cards) = play::parse_play_tag("E:S3").unwrap();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0], Card::new(Suit::Spades, Rank::Three));
+
+    let mut pos = Position {
+        hands: deal.hands,
+        next_to_act: Direction::East,
+        current_trick: vec![],
+    };
+    for card in &cards {
+        pos = pos.play_card(*card, Strain::Spades).unwrap();
+    }
+    // After one card, current_trick should have 1 card and next_to_act = S.
+    assert_eq!(pos.current_trick.len(), 1);
+    assert_eq!(pos.next_to_act, Direction::South);
+}
+
+#[test]
+fn test_play_trace_import_complete_trick() {
+    DdsSolver::init();
+    let deal = pbn::parse_deal_tag(PBN[0]).unwrap();
+    let (_, cards) = play::parse_play_tag("E:S3=S5=S2=SQ").unwrap();
+    assert_eq!(cards.len(), 4);
+
+    let mut pos = Position {
+        hands: deal.hands,
+        next_to_act: Direction::East,
+        current_trick: vec![],
+    };
+    for card in &cards {
+        pos = pos.play_card(*card, Strain::Spades).unwrap();
+    }
+    // Complete trick: current_trick empty, N (winner of SQ) leads next.
+    assert!(pos.current_trick.is_empty());
+    assert_eq!(pos.next_to_act, Direction::North);
+}

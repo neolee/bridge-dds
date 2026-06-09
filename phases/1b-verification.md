@@ -150,7 +150,31 @@ echo '[Position "N:AKQJ... .AKQJ.. ..AKQJ. ...AKQJ"]
 ' | cargo run -- solve --trump NT --format json
 ```
 
-### 12. Error cases
+### 12. Play trace (with prefix, no --declarer needed)
+
+```bash
+echo '[Deal "N:QJ6.K652.J85.T98 873.J97.AT764.Q4 K5.T83.KQ9.A7652 AT942.AQ4.32.KJ3"]
+[Dealer "N"]
+[Vulnerable "None"]
+[Play "E:S3=S5=S2=SQ"]
+' | cargo run -- solve --trump S
+```
+
+Expected: continuation analysis showing N won the trick and leads next.
+
+### 13. Play trace (no prefix, --declarer required)
+
+```bash
+echo '[Deal "N:QJ6.K652.J85.T98 873.J97.AT764.Q4 K5.T83.KQ9.A7652 AT942.AQ4.32.KJ3"]
+[Dealer "N"]
+[Vulnerable "None"]
+[Play "S3"]
+' | cargo run -- solve --trump S
+```
+
+Expected: error (`--declarer is required when Play tag has no direction prefix`).
+
+### 14. Error cases
 
 ```bash
 # Missing --trump and no [Trump] tag

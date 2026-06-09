@@ -31,6 +31,10 @@ enum Command {
         #[arg(long)]
         first: Option<String>,
 
+        /// Declarer (for Play trace import): N, E, S, or W
+        #[arg(long)]
+        declarer: Option<String>,
+
         /// Emit a position matrix instead of continuation analysis
         #[arg(long)]
         matrix: bool,
@@ -51,9 +55,10 @@ fn main() {
             format,
             trump,
             first,
+            declarer,
             matrix,
         } => {
-            if let Err(e) = cmd_solve(format, trump, first, matrix) {
+            if let Err(e) = cmd_solve(format, trump, first, declarer, matrix) {
                 eprintln!("error: {}", e);
                 std::process::exit(1);
             }
@@ -65,6 +70,7 @@ fn cmd_solve(
     format: OutputFormat,
     trump_arg: Option<String>,
     first_arg: Option<String>,
+    declarer_arg: Option<String>,
     matrix: bool,
 ) -> Result<(), Error> {
     let mut input = String::new();
@@ -77,7 +83,11 @@ fn cmd_solve(
         return cmd_residual(format, trump_arg, first_arg, matrix, &input);
     }
 
-    // Full-deal path (Phase 1a behavior).
+    // Full-deal path. If a Play tag is present, route to play trace analysis.
+    if input.contains("[Play ") {
+        return cmd_play_trace(format, trump_arg, declarer_arg, &input);
+    }
+
     let board = core::pbn::parse_record(&input)?;
     let table = DdsSolver::solve_table(&board.deal)?;
     let par = DdsSolver::compute_par(&table, board.dealer, board.vulnerable)?;
@@ -152,6 +162,99 @@ fn cmd_residual(
 }
 
 // --- Full-deal text output (Phase 1a) ---
+
+fn cmd_play_trace(
+    format: OutputFormat,
+    trump_arg: Option<String>,
+    declarer_arg: Option<String>,
+    input: &str,
+) -> Result<(), Error> {
+    let board = core::pbn::parse_record(input)?;
+
+    let trump_s = trump_arg
+        .ok_or_else(|| Error::InvalidTrump("--trump is required for Play trace analysis".into()))?;
+    let trump = Strain::from_char(trump_s.chars().next().unwrap_or(' '))
+        .ok_or_else(|| Error::InvalidTrump(trump_s.clone()))?;
+
+    let play_value = extract_tag_value(input, "Play")?;
+    let (tag_leader, cards) = core::play::parse_play_tag(&play_value)?;
+
+    // Opening leader: Play tag prefix takes priority, otherwise derive from declarer.
+    let opening_leader = if let Some(tl) = tag_leader {
+        tl
+    } else {
+        let declarer_s = declarer_arg.ok_or_else(|| {
+            Error::Dds("--declarer is required when Play tag has no direction prefix".into())
+        })?;
+        let declarer = Direction::from_char(declarer_s.chars().next().unwrap_or(' '))
+            .ok_or_else(|| Error::Dds(format!("invalid declarer: {}", declarer_s)))?;
+        declarer.next()
+    };
+
+    if cards.is_empty() {
+        let pos = Position {
+            hands: board.deal.hands,
+            next_to_act: opening_leader,
+            current_trick: vec![],
+        };
+        let results = DdsSolver::solve_position(&pos, trump)?;
+        match format {
+            OutputFormat::Text => print_text_continuation(&pos, trump, &results),
+            OutputFormat::Json => print_json_continuation(&pos, trump, &results),
+        }
+        return Ok(());
+    }
+
+    // Simulate play for turn tracking and validation.
+    let mut track = Position {
+        hands: board.deal.hands,
+        next_to_act: opening_leader,
+        current_trick: vec![],
+    };
+    for card in &cards {
+        track = track
+            .play_card(*card, trump)
+            .map_err(|e| Error::InvalidPlayTrace(format!("card {}: {}", card.to_pbn(), e)))?;
+    }
+
+    // Build final Position: all original cards in hands, only the
+    // final incomplete trick in current_trick (from the tracking state).
+    let pos = Position {
+        hands: board.deal.hands,
+        next_to_act: track.next_to_act,
+        current_trick: track.current_trick,
+    };
+
+    let results = DdsSolver::solve_position(&pos, trump)?;
+
+    match format {
+        OutputFormat::Text => print_text_continuation(&pos, trump, &results),
+        OutputFormat::Json => print_json_continuation(&pos, trump, &results),
+    }
+
+    Ok(())
+}
+
+/// Extract the value of a PBN tag from raw input.
+fn extract_tag_value(input: &str, tag: &str) -> Result<String, Error> {
+    for line in input.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with(&format!("[{} ", tag)) || line.starts_with(&format!("[{}\t", tag)) {
+            // Extract value between quotes.
+            let start = line
+                .find('"')
+                .ok_or_else(|| Error::PbnParse(format!("missing quote in {} tag", tag)))?;
+            let end = line
+                .rfind('"')
+                .ok_or_else(|| Error::PbnParse(format!("missing closing quote in {} tag", tag)))?;
+            return Ok(line[start + 1..end].to_string());
+        }
+    }
+    Err(Error::PbnParse(format!("missing {} tag", tag)))
+}
 
 fn print_text_full_deal(table: &TricksMatrix, par: &ParResult) {
     use bridge_dds::core::deal::Side;

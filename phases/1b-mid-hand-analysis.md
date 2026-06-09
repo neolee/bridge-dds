@@ -15,8 +15,8 @@ This phase is centered on the current position, not on how that position was rea
 - The raw `DDS` score from `SolveBoardPBN` is interpreted as `tricks_for_side_to_act` from the trick leader's perspective. Mid-trick, the trick leader is `current_trick[0].player`; on a clean trick boundary it is `next_to_act`.
 - PBN input supports both clean trick boundaries and mid-trick states via the optional `CurrentTrick` tag.
 - Runtime trial play must support `current_trick` lengths from `0` to `3`, because hands become uneven during a trick.
-- `Play` trace import is an extra entry path. It derives a `Position`, then reuses the same analysis pipeline.
-- Imported `Play` traces warn on follow-suit violations and continue when possible. Interactive `play_card` rejects follow-suit violations as hard errors.
+- `Play` trace import is an extra entry path. It derives a `Position`, then reuses the same analysis pipeline. The opening leader is determined from the Play tag's optional direction prefix; `--declarer` is only required when the prefix is absent.
+- Imported `Play` traces use `play_card` for validation (card ownership, follow-suit) and turn tracking (trick winners). All cards remain in the hands in the final Position; only the incomplete final trick goes into `current_trick`.
 - `Position Matrix` output must label row semantics as `next_to_act`, not `declarer`.
 
 These decisions keep the library model independent from contract scoring. This matters because residual positions often lack the earlier trick history, so total tricks and score may be unknowable and are not required for continuation analysis.
@@ -358,48 +358,23 @@ Behavior:
 
 ### 10. Extra Step: Import `Play` Trace (`src/core/play.rs`)
 
-This step is part of `Phase 1b`, but it depends on the core `Position` pipeline.
+Parse a PBN `Play` tag and convert a complete `Deal + Play + trump` into a `Position`.
 
-Add a `Play` parser that converts a complete `Deal + Play + trump` into a `Position`.
-
-```rust
-pub struct RawPlayTrace {
-    pub tag_leader: Option<Direction>,
-    pub cards: Vec<Card>,
-}
-
-pub fn parse_play_tag(value: &str) -> Result<RawPlayTrace, Error>;
-
-pub fn position_from_play_trace(
-    deal: &Deal,
-    opening_leader: Direction,
-    trump: Strain,
-    trace: &RawPlayTrace,
-) -> Result<PositionFromTrace, Error>;
-
-pub struct PositionFromTrace {
-    pub position: Position,
-    pub tricks_won_ns: u8,
-    pub tricks_won_ew: u8,
-    pub warnings: Vec<PlayWarning>,
-}
-```
-
-Parsing rules:
+**Parsing** (`parse_play_tag` in `src/core/play.rs`):
 
 - Accept an optional leading direction prefix such as `W:`.
-- Parse cards as a flat play-order sequence.
-- Whitespace and `=` may both separate cards.
-- Do not require the card count to be a multiple of `4`.
+- Split by whitespace for tricks, then by `=` for cards within a trick.
+- Return a flat `Vec<Card>` in play order.
 
-Validation rules:
+**Trace processing** (`cmd_play_trace` in `src/cli/main.rs`):
 
-- A played card must belong to the player who is to act.
-- A card may not be played twice.
-- Follow-suit violations are warnings for imported `Play` traces.
-- If the optional `Play` prefix conflicts with the derived opening leader, return a warning or error before deriving the position. Prefer error in `CLI` mode.
+- The opening leader is the Play tag prefix if present; otherwise derived from `--declarer` (`declarer.next()`).
+- Use `play_card` on a tracking Position to validate each card (ownership, follow-suit) and compute trick winners.
+- Build the final Position with all original cards in `hands`. Only the incomplete final trick goes into `current_trick`; DDS removes those internally.
+- `next_to_act` is determined by the tracking Position.
+- Call `solve_position` and output continuation analysis.
 
-This import path may also track `tricks_won_ns` and `tricks_won_ew`, but the core solver must not require those counts.
+**CLI flags:** `--trump` is required. `--declarer` is only required when the Play tag has no direction prefix.
 
 ## Output
 
