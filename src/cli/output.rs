@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use bridge_dds::core::deal::{Direction, Strain};
-use bridge_dds::core::position::Position;
+use bridge_dds::core::position::SnapshotPosition;
 use bridge_dds::core::{Board, ParResult, TricksMatrix};
 
 pub fn print_text_full_deal(table: &TricksMatrix, par: &ParResult) {
@@ -121,7 +121,7 @@ pub fn print_json_position_matrix(pm: &bridge_dds::dds::PositionMatrix) {
 }
 
 pub fn print_text_continuation(
-    pos: &Position,
+    pos: &SnapshotPosition,
     trump: Strain,
     results: &[bridge_dds::dds::CardResult],
 ) {
@@ -130,24 +130,23 @@ pub fn print_text_continuation(
         other => other.as_char().to_string(),
     };
 
-    let first = pos
-        .current_trick
-        .first()
-        .map(|p| p.player)
-        .unwrap_or(pos.next_to_act);
+    let first = pos.current_trick().leader();
+    let next_to_act = pos.current_trick().next_to_act();
 
     println!("Trump: {}", trump_label);
     println!("First: {}", first.as_char());
-    if pos.current_trick.is_empty() {
+    if pos.current_trick().is_empty() {
         println!("Current tricks: (empty)");
     } else {
         print!("Current tricks: ");
-        for p in &pos.current_trick {
-            print!("{}{} ", p.player.as_char(), p.card.to_pbn());
+        for i in 0..pos.current_trick().len() {
+            let card = pos.current_trick().cards()[i];
+            let player = pos.current_trick().player_at(i).unwrap();
+            print!("{}{} ", player.as_char(), card.to_pbn());
         }
         println!();
     }
-    println!("Next to act: {}", pos.next_to_act.as_char());
+    println!("Next to act: {}", next_to_act.as_char());
     println!();
 
     let mut by_score: BTreeMap<u8, Vec<String>> = BTreeMap::new();
@@ -158,18 +157,13 @@ pub fn print_text_continuation(
             .push(r.card.to_pbn());
     }
 
-    let score_side = if let Some(first_played) = pos.current_trick.first() {
-        first_played.player
-    } else {
-        pos.next_to_act
-    };
-    let side_label = match score_side {
+    let side_label = match next_to_act {
         Direction::North | Direction::South => "NS",
         Direction::East | Direction::West => "EW",
     };
     println!(
         "{} plays for {} side tricks:",
-        pos.next_to_act.as_char(),
+        next_to_act.as_char(),
         side_label
     );
     for (score, cards) in by_score.iter().rev() {
@@ -178,7 +172,7 @@ pub fn print_text_continuation(
 }
 
 pub fn print_json_continuation(
-    pos: &Position,
+    pos: &SnapshotPosition,
     trump: Strain,
     results: &[bridge_dds::dds::CardResult],
 ) {
@@ -200,11 +194,12 @@ pub fn print_json_continuation(
             Strain::NoTrump => "NT".to_string(),
             other => other.as_char().to_string(),
         },
-        next_to_act: pos.next_to_act.as_char().to_string(),
+        next_to_act: pos.current_trick().next_to_act().as_char().to_string(),
         current_trick: pos
-            .current_trick
+            .current_trick()
+            .cards()
             .iter()
-            .map(|p| format!("{}{}", p.player.as_char(), p.card.to_pbn()))
+            .map(|c| c.to_pbn())
             .collect(),
         suggested: results
             .iter()

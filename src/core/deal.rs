@@ -289,6 +289,10 @@ impl Direction {
         }
     }
 
+    pub fn advance(self, seats: usize) -> Direction {
+        Direction::from_dds_index((self.dds_index() + seats) % 4).unwrap()
+    }
+
     pub fn from_dds_index(i: usize) -> Option<Direction> {
         match i {
             0 => Some(Direction::North),
@@ -477,6 +481,130 @@ impl Hand {
     }
 }
 
+/// Error when constructing or mutating `Hands`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandsError {
+    TooManyCards { direction: Direction, count: usize },
+    DuplicateCard { card: Card },
+    CardNotHeld { direction: Direction, card: Card },
+}
+
+impl std::fmt::Display for HandsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HandsError::TooManyCards { direction, count } => {
+                write!(f, "{:?} has {} cards (max 13)", direction, count)
+            }
+            HandsError::DuplicateCard { card } => {
+                write!(
+                    f,
+                    "duplicate card: {}{}",
+                    card.suit.as_char(),
+                    card.rank.as_char()
+                )
+            }
+            HandsError::CardNotHeld { direction, card } => {
+                write!(
+                    f,
+                    "{:?} does not hold {}{}",
+                    direction,
+                    card.suit.as_char(),
+                    card.rank.as_char()
+                )
+            }
+        }
+    }
+}
+
+/// Four hands indexed by absolute direction (`N`, `E`, `S`, `W`).
+///
+/// Invariants enforced at construction and by every mutation:
+/// - Each hand contains at most 13 cards.
+/// - No card occurs in more than one hand.
+/// - Single-hand duplicate cards are already prevented by `Hand`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hands {
+    hands: [Hand; 4],
+}
+
+impl Hands {
+    pub fn try_new(hands: [Hand; 4]) -> Result<Self, HandsError> {
+        let mut seen: u64 = 0;
+        for (i, hand) in hands.iter().enumerate() {
+            if hand.len() > 13 {
+                return Err(HandsError::TooManyCards {
+                    direction: Direction::from_dds_index(i).unwrap(),
+                    count: hand.len(),
+                });
+            }
+            for card in hand.cards() {
+                let pos = card.suit.dds_index() * 13 + card.rank.bit_index();
+                let mask = 1u64 << pos;
+                if seen & mask != 0 {
+                    return Err(HandsError::DuplicateCard { card });
+                }
+                seen |= mask;
+            }
+        }
+        Ok(Hands { hands })
+    }
+
+    pub fn get(&self, direction: Direction) -> &Hand {
+        &self.hands[direction.dds_index()]
+    }
+
+    pub fn counts(&self) -> [usize; 4] {
+        [
+            self.hands[0].len(),
+            self.hands[1].len(),
+            self.hands[2].len(),
+            self.hands[3].len(),
+        ]
+    }
+
+    pub fn total_count(&self) -> usize {
+        self.hands.iter().map(|h| h.len()).sum()
+    }
+
+    pub fn owner_of(&self, card: Card) -> Option<Direction> {
+        for (i, hand) in self.hands.iter().enumerate() {
+            if hand.contains(card) {
+                return Direction::from_dds_index(i);
+            }
+        }
+        None
+    }
+
+    pub fn remove(&self, direction: Direction, card: Card) -> Result<Self, HandsError> {
+        let idx = direction.dds_index();
+        if !self.hands[idx].contains(card) {
+            return Err(HandsError::CardNotHeld { direction, card });
+        }
+        let mut new_hands = self.hands;
+        new_hands[idx] = self.hands[idx].remove(card);
+        Ok(Hands { hands: new_hands })
+    }
+
+    pub fn add(&self, direction: Direction, card: Card) -> Result<Self, HandsError> {
+        let idx = direction.dds_index();
+        if self.hands[idx].len() >= 13 {
+            return Err(HandsError::TooManyCards {
+                direction,
+                count: self.hands[idx].len() + 1,
+            });
+        }
+        if self.owner_of(card).is_some() {
+            return Err(HandsError::DuplicateCard { card });
+        }
+        let mut new_hands = self.hands;
+        new_hands[idx] = self.hands[idx].add(card).map_err(|_| {
+            // add() only fails on duplicates at Hand level, but we already checked
+            HandsError::DuplicateCard { card }
+        })?;
+        Ok(Hands { hands: new_hands })
+    }
+}
+
 /// Four hands plus the `<first>` direction from the Deal tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deal {
@@ -595,6 +723,82 @@ mod tests {
         assert_eq!(Strain::Diamonds.dds_index(), 2);
         assert_eq!(Strain::Clubs.dds_index(), 3);
         assert_eq!(Strain::NoTrump.dds_index(), 4);
+    }
+
+    #[test]
+    fn test_direction_advance() {
+        assert_eq!(Direction::North.advance(0), Direction::North);
+        assert_eq!(Direction::North.advance(1), Direction::East);
+        assert_eq!(Direction::North.advance(4), Direction::North);
+        assert_eq!(Direction::East.advance(3), Direction::North);
+    }
+
+    #[test]
+    fn test_hands_try_new_valid() {
+        let hands = [
+            Hand::from_cards(&[
+                Card::new(Suit::Spades, Rank::Ace),
+                Card::new(Suit::Spades, Rank::King),
+            ])
+            .unwrap(),
+            Hand::from_cards(&[Card::new(Suit::Hearts, Rank::Ace)]).unwrap(),
+            Hand::from_cards(&[Card::new(Suit::Diamonds, Rank::Queen)]).unwrap(),
+            Hand::from_cards(&[Card::new(Suit::Clubs, Rank::Two)]).unwrap(),
+        ];
+        let h = Hands::try_new(hands).unwrap();
+        assert_eq!(h.total_count(), 5);
+        assert_eq!(h.counts(), [2, 1, 1, 1]);
+    }
+
+    #[test]
+    fn test_hands_add_rejects_when_full() {
+        let all_spades: Vec<Card> = Rank::all()
+            .iter()
+            .map(|&r| Card::new(Suit::Spades, r))
+            .collect();
+        let hands = [
+            Hand::from_cards(&all_spades).unwrap(),
+            Hand::empty(),
+            Hand::empty(),
+            Hand::empty(),
+        ];
+        let h = Hands::try_new(hands).unwrap();
+        assert_eq!(h.get(Direction::North).len(), 13);
+        let result = h.add(Direction::North, Card::new(Suit::Hearts, Rank::Ace));
+        assert!(matches!(result, Err(HandsError::TooManyCards { .. })));
+    }
+
+    #[test]
+    fn test_hands_rejects_duplicate_across_hands() {
+        let sa = Card::new(Suit::Spades, Rank::Ace);
+        let hands = [
+            Hand::from_cards(&[sa]).unwrap(),
+            Hand::from_cards(&[sa]).unwrap(),
+            Hand::empty(),
+            Hand::empty(),
+        ];
+        assert!(Hands::try_new(hands).is_err());
+    }
+
+    #[test]
+    fn test_hands_remove_and_add() {
+        let sa = Card::new(Suit::Spades, Rank::Ace);
+        let hands = [
+            Hand::from_cards(&[sa]).unwrap(),
+            Hand::from_cards(&[Card::new(Suit::Hearts, Rank::Ace)]).unwrap(),
+            Hand::empty(),
+            Hand::empty(),
+        ];
+        let h = Hands::try_new(hands).unwrap();
+        assert_eq!(h.owner_of(sa), Some(Direction::North));
+
+        let h2 = h.remove(Direction::North, sa).unwrap();
+        assert_eq!(h2.total_count(), 1);
+        assert!(h2.owner_of(sa).is_none());
+
+        let h3 = h2.add(Direction::North, sa).unwrap();
+        assert_eq!(h3.total_count(), 2);
+        assert_eq!(h3.owner_of(sa), Some(Direction::North));
     }
 
     #[test]

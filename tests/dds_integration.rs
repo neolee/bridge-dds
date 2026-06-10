@@ -103,9 +103,9 @@ fn test_deal(idx: usize) {
 
 // --- Phase 1b: position analysis ---
 
-use bridge_dds::core::deal::{Card, Direction, Hand, Rank, Strain, Suit};
+use bridge_dds::core::deal::{Card, Direction, Hand, Hands, Rank, Strain, Suit};
 use bridge_dds::core::pbn;
-use bridge_dds::core::position::{PlayedCard, Position};
+use bridge_dds::core::position::{CurrentTrick, PlayPosition, SnapshotPosition};
 
 fn one_suit_hand(suit: Suit) -> Hand {
     Hand::from_cards(&[
@@ -117,25 +117,23 @@ fn one_suit_hand(suit: Suit) -> Hand {
     .unwrap()
 }
 
-fn four_suit_position() -> Position {
-    Position {
-        hands: [
-            one_suit_hand(Suit::Spades),
-            one_suit_hand(Suit::Hearts),
-            one_suit_hand(Suit::Diamonds),
-            one_suit_hand(Suit::Clubs),
-        ],
-        next_to_act: Direction::North,
-        current_trick: vec![],
-    }
+fn four_suit_snapshot() -> SnapshotPosition {
+    let hands = Hands::try_new([
+        one_suit_hand(Suit::Spades),
+        one_suit_hand(Suit::Hearts),
+        one_suit_hand(Suit::Diamonds),
+        one_suit_hand(Suit::Clubs),
+    ])
+    .unwrap();
+    SnapshotPosition::try_new(hands, CurrentTrick::empty(Direction::North)).unwrap()
 }
 
 #[test]
 fn test_position_clean_trick() {
     DdsSolver::init();
-    let pos = four_suit_position();
-    let results = DdsSolver::solve_position(&pos, Strain::NoTrump).unwrap();
-    // N has only spades, leads with NT. All 4 spade cards returned.
+    let snap = four_suit_snapshot();
+    let play = PlayPosition::try_from(snap).unwrap();
+    let results = DdsSolver::solve_position(&play, Strain::NoTrump).unwrap();
     assert_eq!(results.len(), 4);
     for r in &results {
         assert_eq!(r.card.suit, Suit::Spades);
@@ -146,16 +144,14 @@ fn test_position_clean_trick() {
 #[test]
 fn test_position_matrix() {
     DdsSolver::init();
-    let pos = four_suit_position();
-    let pm = DdsSolver::solve_position_matrix(&pos).unwrap();
-    // Each cell should be a valid trick count (0..=4 for 4 cards each).
+    let snap = four_suit_snapshot();
+    let pm = DdsSolver::solve_position_matrix(&snap).unwrap();
     for strain in Strain::all() {
         for next_idx in 0..4 {
             let v = pm.data[strain.dds_index()][next_idx];
             assert!(v <= 4, "strain {:?} next {}: got {}", strain, next_idx, v);
         }
     }
-    // When a player leads their own suit, they should get at least some tricks.
     for i in 0..4 {
         let strain = Strain::from_dds_index(i).unwrap();
         assert!(pm.data[i][i] > 0, "own suit {:?}: got 0", strain);
@@ -165,21 +161,18 @@ fn test_position_matrix() {
 #[test]
 fn test_position_mid_trick_1_card() {
     DdsSolver::init();
-    let pos = Position {
-        hands: [
-            one_suit_hand(Suit::Spades),
-            one_suit_hand(Suit::Hearts),
-            one_suit_hand(Suit::Diamonds),
-            one_suit_hand(Suit::Clubs),
-        ],
-        next_to_act: Direction::East,
-        current_trick: vec![PlayedCard {
-            player: Direction::North,
-            card: Card::new(Suit::Spades, Rank::Ace),
-        }],
-    };
-    let results = DdsSolver::solve_position(&pos, Strain::NoTrump).unwrap();
-    // E is next, holds hearts only. N's SA wins this trick.
+    let hands = Hands::try_new([
+        one_suit_hand(Suit::Spades),
+        one_suit_hand(Suit::Hearts),
+        one_suit_hand(Suit::Diamonds),
+        one_suit_hand(Suit::Clubs),
+    ])
+    .unwrap();
+    let ct =
+        CurrentTrick::try_new(Direction::North, vec![Card::new(Suit::Spades, Rank::Ace)]).unwrap();
+    let snap = SnapshotPosition::try_new(hands, ct).unwrap();
+    let play = PlayPosition::try_from(snap).unwrap();
+    let results = DdsSolver::solve_position(&play, Strain::NoTrump).unwrap();
     for r in &results {
         assert_eq!(r.card.suit, Suit::Hearts);
     }
@@ -188,34 +181,56 @@ fn test_position_mid_trick_1_card() {
 #[test]
 fn test_position_mid_trick_3_cards() {
     DdsSolver::init();
-    let pos = Position {
-        hands: [
-            one_suit_hand(Suit::Spades),
-            one_suit_hand(Suit::Hearts),
-            one_suit_hand(Suit::Diamonds),
-            one_suit_hand(Suit::Clubs),
+    let hands = Hands::try_new([
+        one_suit_hand(Suit::Spades),
+        one_suit_hand(Suit::Hearts),
+        one_suit_hand(Suit::Diamonds),
+        one_suit_hand(Suit::Clubs),
+    ])
+    .unwrap();
+    let ct = CurrentTrick::try_new(
+        Direction::North,
+        vec![
+            Card::new(Suit::Spades, Rank::Ace),
+            Card::new(Suit::Hearts, Rank::Ace),
+            Card::new(Suit::Diamonds, Rank::Ace),
         ],
-        next_to_act: Direction::West,
-        current_trick: vec![
-            PlayedCard {
-                player: Direction::North,
-                card: Card::new(Suit::Spades, Rank::Ace),
-            },
-            PlayedCard {
-                player: Direction::East,
-                card: Card::new(Suit::Hearts, Rank::Ace),
-            },
-            PlayedCard {
-                player: Direction::South,
-                card: Card::new(Suit::Diamonds, Rank::Ace),
-            },
-        ],
-    };
-    let results = DdsSolver::solve_position(&pos, Strain::NoTrump).unwrap();
-    // W is last, holds clubs only. N's SA wins.
+    )
+    .unwrap();
+    let snap = SnapshotPosition::try_new(hands, ct).unwrap();
+    let play = PlayPosition::try_from(snap).unwrap();
+    let results = DdsSolver::solve_position(&play, Strain::NoTrump).unwrap();
     for r in &results {
         assert_eq!(r.card.suit, Suit::Clubs);
     }
+}
+
+#[test]
+fn test_play_trace_import_one_card() {
+    DdsSolver::init();
+    let deal = pbn::parse_deal_tag(PBN[0]).unwrap();
+    let (_, cards) = play::parse_play_tag("E:S3").unwrap();
+    let hands = Hands::try_new(deal.hands).unwrap();
+    let snap = SnapshotPosition::try_new(hands, CurrentTrick::empty(Direction::East)).unwrap();
+    let mut track = PlayPosition::try_from(snap).unwrap();
+    track.play_card(cards[0], Strain::Spades).unwrap();
+    assert_eq!(track.current_trick().len(), 1);
+    assert_eq!(track.current_trick().next_to_act(), Direction::South);
+}
+
+#[test]
+fn test_play_trace_import_complete_trick() {
+    DdsSolver::init();
+    let deal = pbn::parse_deal_tag(PBN[0]).unwrap();
+    let (_, cards) = play::parse_play_tag("E:S3=S5=S2=SQ").unwrap();
+    let hands = Hands::try_new(deal.hands).unwrap();
+    let snap = SnapshotPosition::try_new(hands, CurrentTrick::empty(Direction::East)).unwrap();
+    let mut track = PlayPosition::try_from(snap).unwrap();
+    for card in &cards {
+        track.play_card(*card, Strain::Spades).unwrap();
+    }
+    assert!(track.current_trick().is_empty());
+    assert_eq!(track.current_trick().next_to_act(), Direction::North);
 }
 
 #[test]
@@ -271,46 +286,4 @@ fn test_parse_play_tag_multi_trick() {
     let (leader, cards) = play::parse_play_tag("N:SA=HK=DQ=CJ S2=H3=D4=C5").unwrap();
     assert_eq!(leader, Some(Direction::North));
     assert_eq!(cards.len(), 8);
-}
-
-#[test]
-fn test_play_trace_import_one_card() {
-    DdsSolver::init();
-    // Use the DDS example deal. E leads S3 with spades trump.
-    let deal = pbn::parse_deal_tag(PBN[0]).unwrap();
-    let (_, cards) = play::parse_play_tag("E:S3").unwrap();
-    assert_eq!(cards.len(), 1);
-    assert_eq!(cards[0], Card::new(Suit::Spades, Rank::Three));
-
-    let mut pos = Position {
-        hands: deal.hands,
-        next_to_act: Direction::East,
-        current_trick: vec![],
-    };
-    for card in &cards {
-        pos = pos.play_card(*card, Strain::Spades).unwrap();
-    }
-    // After one card, current_trick should have 1 card and next_to_act = S.
-    assert_eq!(pos.current_trick.len(), 1);
-    assert_eq!(pos.next_to_act, Direction::South);
-}
-
-#[test]
-fn test_play_trace_import_complete_trick() {
-    DdsSolver::init();
-    let deal = pbn::parse_deal_tag(PBN[0]).unwrap();
-    let (_, cards) = play::parse_play_tag("E:S3=S5=S2=SQ").unwrap();
-    assert_eq!(cards.len(), 4);
-
-    let mut pos = Position {
-        hands: deal.hands,
-        next_to_act: Direction::East,
-        current_trick: vec![],
-    };
-    for card in &cards {
-        pos = pos.play_card(*card, Strain::Spades).unwrap();
-    }
-    // Complete trick: current_trick empty, N (winner of SQ) leads next.
-    assert!(pos.current_trick.is_empty());
-    assert_eq!(pos.next_to_act, Direction::North);
 }
