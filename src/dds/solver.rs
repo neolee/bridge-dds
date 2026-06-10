@@ -14,7 +14,7 @@ static DDS_LOCK: Mutex<()> = Mutex::new(());
 
 pub struct CardResult {
     pub card: Card,
-    pub tricks_for_side_to_act: u8,
+    pub tricks_for_score_side: u8,
     pub is_optimal: bool,
 }
 
@@ -127,7 +127,7 @@ impl DdsSolver {
 
             results.push(CardResult {
                 card: Card::new(suit, rank),
-                tricks_for_side_to_act: score,
+                tricks_for_score_side: score,
                 is_optimal: optimal,
             });
 
@@ -139,7 +139,7 @@ impl DdsSolver {
                             if eq_rank < rank {
                                 results.push(CardResult {
                                     card: Card::new(suit, eq_rank),
-                                    tricks_for_side_to_act: score,
+                                    tricks_for_score_side: score,
                                     is_optimal: optimal,
                                 });
                             }
@@ -166,7 +166,7 @@ impl DdsSolver {
                 let results = Self::solve_position(&play, strain)?;
                 let best = results
                     .iter()
-                    .map(|r| r.tricks_for_side_to_act)
+                    .map(|r| r.tricks_for_score_side)
                     .max()
                     .unwrap_or(0);
                 data[strain.dds_index()][next_idx] = best;

@@ -137,7 +137,35 @@ fn test_position_clean_trick() {
     assert_eq!(results.len(), 4);
     for r in &results {
         assert_eq!(r.card.suit, Suit::Spades);
-        assert_eq!(r.tricks_for_side_to_act, 4);
+        assert_eq!(r.tricks_for_score_side, 4);
+    }
+}
+
+#[test]
+fn test_mid_trick_score_side_is_next_to_act() {
+    DdsSolver::init();
+    let hands = Hands::try_new([
+        one_suit_hand(Suit::Spades),
+        one_suit_hand(Suit::Hearts),
+        one_suit_hand(Suit::Diamonds),
+        one_suit_hand(Suit::Clubs),
+    ])
+    .unwrap();
+    let ct = CurrentTrick::try_new(
+        Direction::North,
+        vec![
+            Card::new(Suit::Spades, Rank::Ace),
+            Card::new(Suit::Hearts, Rank::Ace),
+        ],
+    )
+    .unwrap();
+    let snap = SnapshotPosition::try_new(hands, ct).expect("snapshot");
+    let play = PlayPosition::try_from(snap).unwrap();
+    assert_eq!(play.current_trick().leader(), Direction::North);
+    assert_eq!(play.current_trick().next_to_act(), Direction::South);
+    let results = DdsSolver::solve_position(&play, Strain::NoTrump).unwrap();
+    for r in &results {
+        assert_eq!(r.card.suit, Suit::Diamonds);
     }
 }
 
@@ -170,7 +198,7 @@ fn test_position_mid_trick_1_card() {
     .unwrap();
     let ct =
         CurrentTrick::try_new(Direction::North, vec![Card::new(Suit::Spades, Rank::Ace)]).unwrap();
-    let snap = SnapshotPosition::try_new(hands, ct).unwrap();
+    let snap = SnapshotPosition::try_new(hands, ct).expect("snapshot");
     let play = PlayPosition::try_from(snap).unwrap();
     let results = DdsSolver::solve_position(&play, Strain::NoTrump).unwrap();
     for r in &results {
@@ -197,7 +225,7 @@ fn test_position_mid_trick_3_cards() {
         ],
     )
     .unwrap();
-    let snap = SnapshotPosition::try_new(hands, ct).unwrap();
+    let snap = SnapshotPosition::try_new(hands, ct).expect("snapshot");
     let play = PlayPosition::try_from(snap).unwrap();
     let results = DdsSolver::solve_position(&play, Strain::NoTrump).unwrap();
     for r in &results {

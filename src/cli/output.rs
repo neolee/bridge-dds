@@ -114,7 +114,7 @@ pub fn print_json_position_matrix(pm: &bridge_dds::dds::PositionMatrix) {
     }
     let output = MatrixOutput {
         row_semantics: "next_to_act",
-        value_semantics: "tricks_for_side_to_act",
+        value_semantics: "tricks_for_score_side",
         values: json!(values),
     };
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
@@ -152,7 +152,7 @@ pub fn print_text_continuation(
     let mut by_score: BTreeMap<u8, Vec<String>> = BTreeMap::new();
     for r in results {
         by_score
-            .entry(r.tricks_for_side_to_act)
+            .entry(r.tricks_for_score_side)
             .or_default()
             .push(r.card.to_pbn());
     }
@@ -179,6 +179,7 @@ pub fn print_json_continuation(
     #[derive(Serialize)]
     struct Continuation {
         trump: String,
+        score_side: String,
         next_to_act: String,
         current_trick: Vec<String>,
         suggested: Vec<CardResultJson>,
@@ -186,15 +187,21 @@ pub fn print_json_continuation(
     #[derive(Serialize)]
     struct CardResultJson {
         card: String,
-        tricks_for_side_to_act: u8,
+        tricks_for_score_side: u8,
         optimal: bool,
     }
+    let next = pos.current_trick().next_to_act();
+    let score_side = match next {
+        Direction::North | Direction::South => "NS",
+        Direction::East | Direction::West => "EW",
+    };
     let output = Continuation {
         trump: match trump {
             Strain::NoTrump => "NT".to_string(),
             other => other.as_char().to_string(),
         },
-        next_to_act: pos.current_trick().next_to_act().as_char().to_string(),
+        score_side: score_side.to_string(),
+        next_to_act: next.as_char().to_string(),
         current_trick: pos
             .current_trick()
             .cards()
@@ -205,7 +212,7 @@ pub fn print_json_continuation(
             .iter()
             .map(|r| CardResultJson {
                 card: r.card.to_pbn(),
-                tricks_for_side_to_act: r.tricks_for_side_to_act,
+                tricks_for_score_side: r.tricks_for_score_side,
                 optimal: r.is_optimal,
             })
             .collect(),
