@@ -19,12 +19,12 @@
 
 ### `1b` - Mid-Hand Analysis
 
-- [ ] Implement `PBN` `Play` tag parsing.
-- [ ] Implement play-trace legality validation.
-- [ ] Use `AnalysePlayPBN` to evaluate the supplied play trace.
-- [ ] Derive the residual state: remaining cards, leader, and current trick.
-- [ ] Use `SolveBoardPBN` to return continuation analysis from the residual state.
-- [ ] Extend `bridge solve` with play-trace analysis output when a `Play` tag is present.
+- [x] Implement `Position`-based double-dummy continuation analysis.
+- [x] Add `SnapshotPosition`, `PlayPosition`, `Hands`, and `CurrentTrick` domain types.
+- [x] Implement `PBN` `Play` tag parsing and play-trace legality validation.
+- [x] Derive the residual state and use `SolveBoardPBN` for continuation analysis.
+- [x] Extend `bridge solve` with position and play-trace analysis.
+- [~] `AnalysePlayPBN` historical evaluation reclassified to `Phase 2b`.
 
 ## Phase 2 - `REST` API Service
 
