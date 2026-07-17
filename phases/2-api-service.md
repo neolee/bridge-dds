@@ -176,7 +176,7 @@ The standard `Play` section is parsed as trick rows with four fixed player colum
 
 Phase 2 accepts explicit card tokens and the standard `-` placeholder only where required to represent seats that have not yet played in the incomplete final trick. Normalization rejects unknown-card gaps, a real card after a missing chronological turn, placeholders in completed tricks, and any play data after the incomplete trick. Claims, annotations, comments, and all other placeholder uses are outside the supported subset and return `invalid_pbn`.
 
-`CurrentTrick` parses into an ordered sequence of player/card pairs. The parser validates syntax and duplicate tags. Continuation normalization derives `trick_leader` and the public card-only `current_trick`, then validates player order, card ownership, follow-suit, and consistency with `First`/`next_to_act`.
+`CurrentTrick` parses into an ordered sequence of player/card pairs. The parser validates syntax, duplicate tags, and the intrinsic value checks: entry count, clockwise player order derived from the first entry, and duplicate cards within the value. Continuation normalization derives `trick_leader` and the public card-only `current_trick`, then validates card ownership, follow-suit, and consistency with `First`/`next_to_act`.
 
 `Contract` parsing supports levels `1` to `7`, strains `S`, `H`, `D`, `C`, and `NT`, with optional `X` or `XX`. The play endpoint extracts only the strain; level and doubling are preserved in `ParsedRecord` but do not affect double-dummy play analysis. Passed-out contract values are rejected for play analysis.
 
@@ -326,7 +326,7 @@ After merging, `trump`, `next_to_act`, and `hands` are required. `trick_leader` 
 
 `score_side` is the side of `next_to_act` (the side `DDS` reports tricks for). `tricks_for_score_side` is the number of tricks that side can achieve from this position.
 
-**Validation**: `Hands` general invariants, four equal hand counts including `current_trick` cards, `current_trick` length `0..3`, cards held by correct players (derived clockwise from `trick_leader`), `next_to_act` matches derived next player, follow-suit enforced, `CurrentTrick` player order validated against `trick_leader` and `next_to_act`.
+**Validation**: `Hands` general invariants, four equal hand counts including `current_trick` cards, `current_trick` length `0..3`, cards held by correct players (derived clockwise from `trick_leader`), `next_to_act` matches derived next player, follow-suit enforced, `CurrentTrick` tag entry order validated intrinsically by the parser.
 
 ### `POST /api/v1/analyze/play`
 
@@ -753,6 +753,7 @@ Document and implement:
 ### Task 11: Update Project Documents
 
 - `PLAN.md`: reclassify `AnalysePlayPBN` historical evaluation from `Phase 1b` to `Phase 2b`, mark `Phase 1b` complete, reflect `Phase 2a`/`2b` task structure.
+- `phases/1b-verification.md`: update case 10's expected error to the parser-stage `CurrentTrick` player-order rejection introduced by Task 4.
 
 ### Task 12: Phase 2a Verification
 
