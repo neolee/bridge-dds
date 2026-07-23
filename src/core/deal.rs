@@ -553,6 +553,12 @@ impl Hands {
         &self.hands[direction.dds_index()]
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (Direction, &Hand)> {
+        Direction::all()
+            .into_iter()
+            .map(|direction| (direction, self.get(direction)))
+    }
+
     pub fn counts(&self) -> [usize; 4] {
         [
             self.hands[0].len(),
@@ -609,9 +615,39 @@ impl Hands {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deal {
     /// The `<first>` direction: whose hand is listed first in the PBN deal.
-    pub first: Direction,
-    /// Hands indexed by absolute direction: hands[0]=N, [1]=E, [2]=S, [3]=W.
-    pub hands: [Hand; 4],
+    first: Direction,
+    /// Hands indexed by absolute direction.
+    hands: Hands,
+}
+
+impl Deal {
+    pub fn try_new(first: Direction, hands: Hands) -> Result<Self, Error> {
+        let counts = hands.counts();
+        for (direction, count) in Direction::all().into_iter().zip(counts) {
+            if count != 13 {
+                return Err(Error::InvalidDeal(format!(
+                    "{} has {} cards, expected 13",
+                    direction.as_char(),
+                    count
+                )));
+            }
+        }
+        if hands.total_count() != 52 {
+            return Err(Error::InvalidDeal(format!(
+                "board has {} cards, expected 52",
+                hands.total_count()
+            )));
+        }
+        Ok(Deal { first, hands })
+    }
+
+    pub fn first(&self) -> Direction {
+        self.first
+    }
+
+    pub fn hands(&self) -> &Hands {
+        &self.hands
+    }
 }
 
 /// A complete board parsed from a PBN record.
@@ -748,6 +784,71 @@ mod tests {
         let h = Hands::try_new(hands).unwrap();
         assert_eq!(h.total_count(), 5);
         assert_eq!(h.counts(), [2, 1, 1, 1]);
+    }
+
+    #[test]
+    fn test_hands_try_new_rejects_too_many_cards() {
+        let mut cards: Vec<Card> = Rank::all()
+            .into_iter()
+            .map(|rank| Card::new(Suit::Spades, rank))
+            .collect();
+        cards.push(Card::new(Suit::Hearts, Rank::Ace));
+        let result = Hands::try_new([
+            Hand::from_cards(&cards).unwrap(),
+            Hand::empty(),
+            Hand::empty(),
+            Hand::empty(),
+        ]);
+        assert_eq!(
+            result.unwrap_err(),
+            HandsError::TooManyCards {
+                direction: Direction::North,
+                count: 14,
+            }
+        );
+    }
+
+    #[test]
+    fn test_hands_iter_uses_direction_order() {
+        let cards = [
+            Card::new(Suit::Spades, Rank::Ace),
+            Card::new(Suit::Hearts, Rank::King),
+            Card::new(Suit::Diamonds, Rank::Queen),
+            Card::new(Suit::Clubs, Rank::Jack),
+        ];
+        let hands = Hands::try_new([
+            Hand::from_cards(&cards[0..1]).unwrap(),
+            Hand::from_cards(&cards[1..2]).unwrap(),
+            Hand::from_cards(&cards[2..3]).unwrap(),
+            Hand::from_cards(&cards[3..4]).unwrap(),
+        ])
+        .unwrap();
+
+        let entries: Vec<_> = hands.iter().collect();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|(direction, _)| *direction)
+                .collect::<Vec<_>>(),
+            Direction::all()
+        );
+        for ((direction, hand), card) in entries.into_iter().zip(cards) {
+            assert!(hand.contains(card));
+            assert_eq!(hands.owner_of(card), Some(direction));
+        }
+    }
+
+    #[test]
+    fn test_deal_requires_complete_hands() {
+        let hands = Hands::try_new([
+            Hand::from_cards(&[Card::new(Suit::Spades, Rank::Ace)]).unwrap(),
+            Hand::from_cards(&[Card::new(Suit::Hearts, Rank::Ace)]).unwrap(),
+            Hand::from_cards(&[Card::new(Suit::Diamonds, Rank::Ace)]).unwrap(),
+            Hand::from_cards(&[Card::new(Suit::Clubs, Rank::Ace)]).unwrap(),
+        ])
+        .unwrap();
+
+        assert!(Deal::try_new(Direction::North, hands).is_err());
     }
 
     #[test]

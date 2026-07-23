@@ -1,4 +1,4 @@
-use super::deal::{Board, Card, Deal, Direction, Hand, Rank, Strain, Suit, Vulnerability};
+use super::deal::{Board, Card, Deal, Direction, Hand, Hands, Rank, Strain, Suit, Vulnerability};
 use super::error::Error;
 
 /// Parse a single PBN record into a `Board`.
@@ -110,45 +110,14 @@ pub fn parse_deal_tag(value: &str) -> Result<Deal, Error> {
 
     // Parse each hand in clockwise order, then map to N/E/S/W indices.
     let mut hands = [Hand::empty(); 4];
-    let mut all_cards = Vec::with_capacity(52);
-
     for (i, hand_str) in hand_strs.iter().enumerate() {
         let dest_idx = (first.dds_index() + i) % 4;
         let cards = parse_hand_pbn(hand_str)?;
-        if cards.len() != 13 {
-            return Err(Error::InvalidDeal(format!(
-                "hand {} has {} cards, expected 13",
-                i + 1,
-                cards.len()
-            )));
-        }
         hands[dest_idx] = Hand::from_cards(&cards)?;
-        all_cards.extend(cards);
     }
 
-    // Check for duplicate cards.
-    if all_cards.len() != 52 {
-        return Err(Error::InvalidDeal(
-            "board does not have exactly 52 cards".into(),
-        ));
-    }
-    // Deduplication check: since we have exactly 52 cards and no hand errors,
-    // duplicates would mean missing cards elsewhere. We check by building a bitmask.
-    let mut seen: u64 = 0;
-    for card in &all_cards {
-        let pos = card.suit.dds_index() * 13 + card.rank.bit_index();
-        let mask = 1u64 << pos;
-        if seen & mask != 0 {
-            return Err(Error::InvalidDeal(format!(
-                "duplicate card: {}{}",
-                card.suit.as_char(),
-                card.rank.as_char()
-            )));
-        }
-        seen |= mask;
-    }
-
-    Ok(Deal { first, hands })
+    let hands = Hands::try_new(hands).map_err(|error| Error::InvalidDeal(error.to_string()))?;
+    Deal::try_new(first, hands)
 }
 
 /// Parse a single hand in PBN format: `S.H.D.C`, e.g. `AKQJT98..8642`.
@@ -204,15 +173,15 @@ fn parse_vulnerable_tag(value: &str) -> Result<Vulnerability, Error> {
 /// Serialize a `Deal` into the format expected by DDS `ddTableDealPBN.cards`.
 ///
 /// Output format: `<first>:<hand1> <hand2> <hand3> <hand4>` where hands are
-/// emitted clockwise from `Deal.first`, suit order `S.H.D.C`, descending ranks.
+/// emitted clockwise from `Deal::first()`, suit order `S.H.D.C`, descending ranks.
 pub fn deal_to_dds_pbn(deal: &Deal) -> String {
-    let first = deal.first;
+    let first = deal.first();
     let mut parts = Vec::with_capacity(4);
 
     // Emit hands clockwise from first.
     for i in 0..4 {
-        let idx = (first.dds_index() + i) % 4;
-        parts.push(hand_to_pbn(&deal.hands[idx]));
+        let direction = first.advance(i);
+        parts.push(hand_to_pbn(deal.hands().get(direction)));
     }
 
     format!(
@@ -245,11 +214,11 @@ fn hand_to_pbn(hand: &Hand) -> String {
 /// Serialize four hands into the PBN string format expected by
 /// `dealPBN.remainCards`. Emits hands clockwise from `first_hand`,
 /// suit order `S.H.D.C`, descending ranks within each suit.
-pub fn hands_to_dds_pbn(hands: &[Hand; 4], first_hand: Direction) -> String {
+pub fn hands_to_dds_pbn(hands: &Hands, first_hand: Direction) -> String {
     let mut parts = Vec::with_capacity(4);
     for i in 0..4 {
-        let idx = (first_hand.dds_index() + i) % 4;
-        parts.push(hand_to_pbn(&hands[idx]));
+        let direction = first_hand.advance(i);
+        parts.push(hand_to_pbn(hands.get(direction)));
     }
     format!(
         "{}:{} {} {} {}",
@@ -264,7 +233,7 @@ pub fn hands_to_dds_pbn(hands: &[Hand; 4], first_hand: Direction) -> String {
 /// Parsed residual position from a PBN record.
 #[derive(Debug)]
 pub struct ResidualInput {
-    pub hands: [Hand; 4],
+    pub hands: Hands,
     pub first: Option<Direction>,
     pub trump: Option<Strain>,
     pub current_trick: Vec<(Direction, Card)>,
@@ -274,7 +243,7 @@ pub struct ResidualInput {
 /// Parse a residual PBN record containing `Position`, `First`, optional `Trump`
 /// and `CurrentTrick` tags.
 pub fn parse_residual_record(input: &str) -> Result<ResidualInput, Error> {
-    let mut hands: Option<[Hand; 4]> = None;
+    let mut hands: Option<Hands> = None;
     let mut first: Option<Direction> = None;
     let mut trump: Option<Strain> = None;
     let mut current_trick: Vec<(Direction, Card)> = vec![];
@@ -347,7 +316,7 @@ pub fn parse_residual_record(input: &str) -> Result<ResidualInput, Error> {
 
     // Validate CurrentTrick: each card must be held by the claimed player.
     for (player, card) in &current_trick {
-        if !hands[player.dds_index()].contains(*card) {
+        if !hands.get(*player).contains(*card) {
             return Err(Error::InvalidPosition(format!(
                 "CurrentTrick: {:?} does not hold {}{}",
                 player,
@@ -368,7 +337,7 @@ pub fn parse_residual_record(input: &str) -> Result<ResidualInput, Error> {
 /// Parse residual hands: same four-hand clockwise format as Deal, but each
 /// hand may contain fewer than 13 cards. All hands must have equal count
 /// (only clean trick boundaries are accepted via PBN input).
-fn parse_residual_hands(value: &str) -> Result<[Hand; 4], Error> {
+fn parse_residual_hands(value: &str) -> Result<Hands, Error> {
     let colon_pos = value
         .find(':')
         .ok_or_else(|| Error::PbnParse(format!("missing ':' in Position tag: {}", value)))?;
@@ -397,7 +366,7 @@ fn parse_residual_hands(value: &str) -> Result<[Hand; 4], Error> {
         hands[dest_idx] = Hand::from_cards(&cards)?;
     }
 
-    Ok(hands)
+    Hands::try_new(hands).map_err(|error| Error::InvalidPosition(error.to_string()))
 }
 
 fn parse_first_tag(value: &str) -> Result<Direction, Error> {
@@ -431,11 +400,11 @@ mod tests {
     fn test_parse_valid_record() {
         let board = parse_record(VALID_RECORD).unwrap();
         assert_eq!(board.dealer, Direction::North);
-        assert_eq!(board.deal.first, Direction::North);
+        assert_eq!(board.deal.first(), Direction::North);
         assert_eq!(board.vulnerable, Vulnerability::None);
         // Verify 52 cards exactly once.
         let mut count = 0;
-        for hand in &board.deal.hands {
+        for (_, hand) in board.deal.hands().iter() {
             count += hand.len();
         }
         assert_eq!(count, 52);
@@ -507,7 +476,7 @@ mod tests {
 ";
         let board = parse_record(rec).unwrap();
         // Deal.first is E because that's what the deal string says.
-        assert_eq!(board.deal.first, Direction::East);
+        assert_eq!(board.deal.first(), Direction::East);
         // Dealer is N because the Dealer tag says so.
         assert_eq!(board.dealer, Direction::North);
     }

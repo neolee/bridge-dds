@@ -164,13 +164,15 @@ The parser supports:
 S3 S5 S2 SQ
 ```
 
-- The existing legacy inline play form for backward compatibility:
+- The existing legacy inline play forms for backward compatibility:
 
 ```pbn
 [Play "E:S3=S5=S2=SQ"]
+[Play "S3=S5=S2=SQ"]
+[Play ""]
 ```
 
-The application normalization layer converts the standard and legacy play forms into the same chronological structured play sequence after source merging. Duplicate `Play` definitions or a `Play` tag containing both inline cards and following section data are errors.
+A `Play` value that is exactly one bare `Direction` is standard `Play`; every other value is legacy inline `Play`. Legacy input retains its optional direction prefix and chronological card sequence. Whitespace and `=` delimit cards but do not define trick boundaries. The application normalization layer converts the standard and legacy forms into the same chronological structured play sequence after source merging. Duplicate `Play` definitions or a legacy inline `Play` tag followed by section data are errors.
 
 The standard `Play` section is parsed as trick rows with four fixed player columns. The direction in the `Play` tag identifies the first column, and the remaining columns proceed clockwise. The parser preserves this row/column structure; normalization combines it with the final merged `deal` and `trump`, validates that each card appears in the correct player's column, determines each completed trick's winner, and emits cards in chronological play order. It must not flatten rows directly because the chronological leader can change between tricks.
 
@@ -666,16 +668,68 @@ Also fix `phases/1b-verification.md` case 8 so `CurrentTrick` players follow clo
 
 `Task 3` documentation changes must be reviewed before `Task 4` parser implementation begins.
 
-### Task 4: Unify PBN Parser
+### Task 4: Unify PBN Parser And Play Normalization
 
 Replace the three current parsing paths (`parse_record`, `parse_residual_record`, `CLI` play-trace string scanning) with a single shared parser:
 
 - Implement the explicitly documented Phase 2 subset, not a complete `PBN 2.1` implementation. Unsupported syntax must fail explicitly rather than be silently misinterpreted.
 - Unified tag-line and supported section-data parsing, duplicate-tag/section detection, unknown-tag policy, and known-tag parsing.
-- Outputs a shared `ParsedRecord` type where all fields are optional. A standard `Play` section is retained as structured trick rows with fixed player columns; the legacy inline form is retained as a chronological card sequence.
-- After source merging supplies the required deal/trump context, the application normalization layer converts either play representation into one chronological structured play sequence. The parser itself must not flatten a standard `Play` section.
+- Output a shared `ParsedRecord` type where all fields are optional. A standard `Play` section is retained as structured trick rows with fixed player columns; the legacy inline form retains an optional opening leader and chronological card sequence.
+- Classify a `Play` value deterministically: an exact bare `Direction` is standard; every other value is legacy inline. The parser must not use following section data to choose the representation.
+- Preserve legacy compatibility for prefixed, unprefixed, empty, whitespace-delimited, and more-than-four-card `=` sequences.
+- After source merging supplies the required `deal`, `trump`, and `opening_leader`, `normalize_play()` converts either play representation into validated chronological `PlayedCard` values and advances one `PlayPosition` to the final state. The parser itself must not flatten a standard `Play` section.
 - `endpoint`s and the `CLI` select allowed tags, apply source overrides, and validate the merged result.
 - No `CLI`, application, or `HTTP` code may parse or scan tag strings directly.
+
+Implement these parser-side boundaries in `src/core/pbn.rs`:
+
+```rust
+pub struct ParsedRecord {
+    pub deal: Option<Deal>,
+    pub dealer: Option<Direction>,
+    pub vulnerable: Option<Vulnerability>,
+    pub position: Option<Hands>,
+    pub first: Option<Direction>,
+    pub trump: Option<Strain>,
+    pub current_trick: Option<ParsedCurrentTrick>,
+    pub contract: Option<ParsedContract>,
+    pub declarer: Option<Direction>,
+    pub auction: Option<ParsedAuction>,
+    pub play: Option<ParsedPlay>,
+}
+
+pub enum ParsedPlay {
+    Standard { first_column: Direction, rows: Vec<PlayRow> },
+    Legacy { opening_leader: Option<Direction>, cards: Vec<Card> },
+}
+
+pub fn parse_record(input: &str) -> Result<ParsedRecord, Error>;
+```
+
+`ParsedCurrentTrick` retains unvalidated player/card pairs. `ParsedContract` retains level, strain, and doubling. `ParsedAuction` retains its first direction and tokenized calls. The full supporting type shapes are specified in `phases/2-task-4-pre-tasks.md`.
+
+Implement these normalization boundaries in `src/core/play.rs`:
+
+```rust
+pub struct NormalizedPlay {
+    opening_leader: Direction,
+    played_cards: Vec<PlayedCard>,
+    final_position: PlayPosition,
+}
+
+pub fn normalize_play(
+    play: &ParsedPlay,
+    deal: &Deal,
+    trump: Strain,
+    opening_leader: Direction,
+) -> Result<NormalizedPlay, Error>;
+```
+
+`normalize_play()` receives final resolved context and does not perform source merging or call `DDS`. Standard normalization retains the immutable `first_column`, maps fixed columns to absolute players, reads each row using the current trick leader, validates placeholders, and uses `PlayPosition::play_card()` for one state-advancement pass. `Task 5` consumes the returned chronological events and final position without replaying the cards.
+
+Keep fine-grained internal `Error` variants through `Task 4`. Add `ConflictingInput(String)` for contradictory final fields. `Task 8` maps internal variants to the stable public error protocol; parser and normalization code must not depend on `HTTP` types.
+
+During `Task 4`, the `CLI` parses once and preserves its existing operation precedence (`Position`, then `Play`, then full deal), argument names, and non-contradictory behavior. Final endpoint applicability is completed by `Task 6` and `Task 8`.
 
 ### Task 5: Define Shared Application Use Cases
 
@@ -691,7 +745,7 @@ src/application/
 
 Each module exposes a use-case function returning a strong-typed result. The application layer must not import `axum`, `HTTP` status codes, `Json`, or `serde_json::Value`.
 
-`Phase 2a` implements play normalization, validation, state advancement, `final_position`, and `final_continuation` as internal results. The full `AnalyzePlay` use case returning `PlayAnalysis` (with historical `trace`) is completed in `Phase 2b`.
+`Task 4` supplies validated play normalization, chronological events, state advancement, and the final `PlayPosition`. `Task 5` consumes that result to expose internal `final_position` and `final_continuation` results without parsing or advancing the cards again. The full `AnalyzePlay` use case returning `PlayAnalysis` (with historical `trace`) is completed in `Phase 2b`.
 
 ### Task 6: Refactor CLI To Use Shared Application Use Cases
 

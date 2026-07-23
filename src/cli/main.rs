@@ -108,8 +108,6 @@ fn cmd_residual(
     matrix: bool,
     input: &str,
 ) -> Result<(), Error> {
-    use bridge_dds::core::deal::Hands;
-
     let residual = core::pbn::parse_residual_record(input)?;
 
     // Resolve first: CLI overrides PBN tag. Must come from at least one source.
@@ -122,9 +120,6 @@ fn cmd_residual(
         return Err(Error::MissingPbnTag("First"));
     };
 
-    let hands = Hands::try_new(residual.hands)
-        .map_err(|e| Error::InvalidPosition(format!("Hands: {}", e)))?;
-
     // Build CurrentTrick: derive leader from the first card's player.
     let ct = if residual.current_trick.is_empty() {
         CurrentTrick::empty(first)
@@ -134,7 +129,7 @@ fn cmd_residual(
         CurrentTrick::try_new(leader, cards)?
     };
 
-    let snap = SnapshotPosition::try_new(hands, ct)?;
+    let snap = SnapshotPosition::try_new(residual.hands, ct)?;
 
     // Resolve trump: CLI overrides PBN tag.
     let trump_str = trump_arg.or(residual.trump.map(|s| s.as_char().to_string()));
@@ -174,8 +169,6 @@ fn cmd_play_trace(
     declarer_arg: Option<String>,
     input: &str,
 ) -> Result<(), Error> {
-    use bridge_dds::core::deal::Hands;
-
     let board = core::pbn::parse_record(input)?;
 
     let trump_s = trump_arg
@@ -197,9 +190,10 @@ fn cmd_play_trace(
         declarer.next()
     };
 
-    let hands = Hands::try_new(board.deal.hands)
-        .map_err(|e| Error::InvalidPosition(format!("Hands: {}", e)))?;
-    let snap = SnapshotPosition::try_new(hands, CurrentTrick::empty(opening_leader))?;
+    let snap = SnapshotPosition::try_new(
+        board.deal.hands().clone(),
+        CurrentTrick::empty(opening_leader),
+    )?;
     let mut track = PlayPosition::try_from(snap)?;
 
     for card in &cards {

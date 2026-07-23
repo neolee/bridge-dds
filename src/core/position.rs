@@ -345,6 +345,30 @@ mod new_tests {
         Hand::from_cards(&[Card::new(suit, r1), Card::new(suit, r2)]).unwrap()
     }
 
+    fn four_cards(suit: Suit) -> Hand {
+        Hand::from_cards(&[
+            Card::new(suit, Rank::Ace),
+            Card::new(suit, Rank::King),
+            Card::new(suit, Rank::Queen),
+            Card::new(suit, Rank::Jack),
+        ])
+        .unwrap()
+    }
+
+    fn four_suit_hands() -> Hands {
+        Hands::try_new([
+            four_cards(Suit::Spades),
+            four_cards(Suit::Hearts),
+            four_cards(Suit::Diamonds),
+            four_cards(Suit::Clubs),
+        ])
+        .unwrap()
+    }
+
+    fn ace_for(direction: Direction) -> Card {
+        Card::new(Suit::all()[direction.dds_index()], Rank::Ace)
+    }
+
     #[test]
     fn test_current_trick_basics() {
         let ct = CurrentTrick::try_new(Direction::North, vec![]).unwrap();
@@ -368,6 +392,68 @@ mod new_tests {
             Card::new(Suit::Clubs, Rank::Ace),
         ];
         assert!(CurrentTrick::try_new(Direction::North, cards).is_err());
+    }
+
+    #[test]
+    fn test_current_trick_derivation_for_all_leaders_and_lengths() {
+        for leader in Direction::all() {
+            for len in 0..=3 {
+                let cards = (0..len)
+                    .map(|index| ace_for(leader.advance(index)))
+                    .collect();
+                let current_trick = CurrentTrick::try_new(leader, cards).unwrap();
+
+                assert_eq!(current_trick.leader(), leader);
+                assert_eq!(current_trick.len(), len);
+                assert_eq!(current_trick.next_to_act(), leader.advance(len));
+                for index in 0..len {
+                    assert_eq!(current_trick.player_at(index), Some(leader.advance(index)));
+                }
+                assert_eq!(current_trick.player_at(len), None);
+            }
+        }
+    }
+
+    #[test]
+    fn test_position_round_trip_for_all_leaders_and_lengths() {
+        for leader in Direction::all() {
+            for len in 0..=3 {
+                let cards = (0..len)
+                    .map(|index| ace_for(leader.advance(index)))
+                    .collect();
+                let current_trick = CurrentTrick::try_new(leader, cards).unwrap();
+                let snapshot = SnapshotPosition::try_new(four_suit_hands(), current_trick).unwrap();
+                let play = PlayPosition::try_from(snapshot.clone()).unwrap();
+
+                assert_eq!(SnapshotPosition::try_from(&play).unwrap(), snapshot);
+                for index in 0..len {
+                    let player = leader.advance(index);
+                    assert!(!play.remaining_hands().get(player).contains(ace_for(player)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_position_boundaries_reject_double_remove_and_add_back() {
+        let current_trick =
+            CurrentTrick::try_new(Direction::North, vec![Card::new(Suit::Spades, Rank::Ace)])
+                .unwrap();
+        let snapshot = SnapshotPosition::try_new(four_suit_hands(), current_trick.clone()).unwrap();
+        let play = PlayPosition::try_from(snapshot).unwrap();
+
+        assert!(play
+            .remaining_hands()
+            .remove(Direction::North, Card::new(Suit::Spades, Rank::Ace))
+            .is_err());
+
+        let reconstructed = SnapshotPosition::try_from(&play).unwrap();
+        assert!(reconstructed
+            .hands()
+            .add(Direction::North, Card::new(Suit::Spades, Rank::Ace))
+            .is_err());
+
+        assert!(PlayPosition::try_new(reconstructed.hands().clone(), current_trick).is_err());
     }
 
     #[test]

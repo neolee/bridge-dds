@@ -194,15 +194,7 @@ fn to_dds_deal(position: &PlayPosition, trump: Strain) -> Result<ffi::dealPBN, E
     let leader = position.current_trick().leader();
     let remaining = position.remaining_hands();
 
-    let remain = pbn::hands_to_dds_pbn(
-        &[
-            *remaining.get(Direction::North),
-            *remaining.get(Direction::East),
-            *remaining.get(Direction::South),
-            *remaining.get(Direction::West),
-        ],
-        Direction::North,
-    );
+    let remain = pbn::hands_to_dds_pbn(remaining, Direction::North);
     if remain.len() >= 80 {
         return Err(Error::DdsBufferTooLong {
             field: "dealPBN.remainCards",
@@ -226,4 +218,82 @@ fn to_dds_deal(position: &PlayPosition, trump: Strain) -> Result<ffi::dealPBN, E
     }
 
     Ok(dds_deal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::deal::{Hand, Hands};
+    use crate::core::position::SnapshotPosition;
+
+    fn one_suit_hand(suit: Suit) -> Hand {
+        Hand::from_cards(&[
+            Card::new(suit, Rank::Ace),
+            Card::new(suit, Rank::King),
+            Card::new(suit, Rank::Queen),
+            Card::new(suit, Rank::Jack),
+        ])
+        .unwrap()
+    }
+
+    fn four_suit_hands() -> Hands {
+        Hands::try_new([
+            one_suit_hand(Suit::Spades),
+            one_suit_hand(Suit::Hearts),
+            one_suit_hand(Suit::Diamonds),
+            one_suit_hand(Suit::Clubs),
+        ])
+        .unwrap()
+    }
+
+    fn ace_for(direction: Direction) -> Card {
+        Card::new(Suit::all()[direction.dds_index()], Rank::Ace)
+    }
+
+    fn remain_cards(deal: &ffi::dealPBN) -> String {
+        unsafe { CStr::from_ptr(deal.remainCards.as_ptr()) }
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[test]
+    fn test_to_dds_deal_for_all_leaders_and_current_trick_lengths() {
+        for leader in Direction::all() {
+            for len in 0..=3 {
+                let cards: Vec<_> = (0..len)
+                    .map(|index| ace_for(leader.advance(index)))
+                    .collect();
+                let current_trick = CurrentTrick::try_new(leader, cards.clone()).unwrap();
+                let snapshot = SnapshotPosition::try_new(four_suit_hands(), current_trick).unwrap();
+                let play = PlayPosition::try_from(snapshot).unwrap();
+                let dds_deal = to_dds_deal(&play, Strain::NoTrump).unwrap();
+
+                assert_eq!(dds_deal.first, leader.dds_index() as i32);
+                assert_eq!(dds_deal.trump, Strain::NoTrump.dds_index() as i32);
+
+                let remain = remain_cards(&dds_deal);
+                assert!(remain.starts_with("N:"));
+                let hand_values: Vec<_> = remain
+                    .split_once(':')
+                    .unwrap()
+                    .1
+                    .split_whitespace()
+                    .collect();
+                assert_eq!(hand_values.len(), 4);
+
+                for (index, card) in cards.iter().enumerate() {
+                    assert_eq!(
+                        dds_deal.currentTrickSuit[index],
+                        card.suit.dds_index() as i32
+                    );
+                    assert_eq!(dds_deal.currentTrickRank[index], card.rank.dds_rank());
+
+                    let player = leader.advance(index);
+                    let suits: Vec<_> = hand_values[player.dds_index()].split('.').collect();
+                    assert!(!suits[card.suit.dds_index()].contains(card.rank.as_char()));
+                }
+            }
+        }
+    }
 }

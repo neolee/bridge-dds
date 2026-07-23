@@ -29,7 +29,7 @@ The `parser` preserves representations that need merged context:
 - `CurrentTrick` remains an ordered list of `Direction`/`Card` pairs.
 - `Auction` remains an opening direction plus tokenized calls.
 - Standard `Play` remains its parsed first-column direction plus fixed-column rows.
-- Legacy inline `Play` remains an opening leader plus a chronological card sequence.
+- Legacy inline `Play` remains an optional opening leader plus a chronological card sequence.
 
 The `parser` must not flatten standard `Play` rows, derive completed-trick winners, infer missing fields, or cross-validate separate tags. Those operations belong to post-merge `normalization`.
 
@@ -46,7 +46,7 @@ Before merging with other sources, the parsed `PBN` representation contributes f
 - A non-empty `CurrentTrick` contributes `trick_leader` from its first pair and contributes card-only `current_trick`; an empty `CurrentTrick` contributes only an empty `current_trick`.
 - `Contract` contributes `trump` from its strain.
 - `Declarer` contributes `declarer`.
-- `Play` contributes `opening_leader` from its prefix and contributes its standard or legacy play representation. Standard `Play` also retains the prefix as its immutable first-column direction.
+- `Play` contributes `opening_leader` when its value supplies one and contributes its standard or legacy play representation. Standard `Play` also retains the tag value as its immutable first-column direction.
 
 These fields participate independently in field-level source priority. After merging, the final `opening_leader` controls the chronological first player for both play representations. A higher-priority `opening_leader` does not change the standard representation's fixed player columns. The final `trick_leader`, `current_trick`, and `next_to_act` values control continuation `normalization`. Any contradictory final relationship returns `conflicting_input`.
 
@@ -159,7 +159,14 @@ Every non-empty `Auction` section line is split on whitespace. Any token outside
 
 ### `Play`
 
-`Play` supports a standard section form and a backward-compatible legacy inline form. The `parser` preserves their distinct structures. The play `normalization` layer converts either representation into the same chronological card sequence after source merging supplies the final `deal`, `trump`, and opening-leader context.
+`Play` supports a standard section form and a backward-compatible legacy inline form. The tag value alone selects the representation:
+
+- A value that is exactly one bare `Direction` (`W`, `N`, `E`, or `S`) is standard `Play` and introduces a section.
+- Every other value is legacy inline `Play`, including an empty value, a direction followed by `:`, and an unprefixed card sequence.
+
+The `parser` does not use following section data to select the representation. Non-empty section data following legacy inline `Play` returns `invalid_pbn`. A bare direction remains standard `Play` when its section is empty.
+
+The `parser` preserves the two representations. The play `normalization` layer converts either representation into the same chronological card sequence after source merging supplies the final `deal`, `trump`, and opening-leader context.
 
 #### Standard `Play`
 
@@ -183,19 +190,25 @@ For example, with fixed columns `W N E S`, if `N` leads the incomplete final tri
 - H2 H3 -
 ```
 
-`Normalization` rejects a real card after a missing chronological turn, a card in the wrong player's column, card ownership violations, duplicate played cards, follow-suit violations, and any impossible winner or leader transition.
+Parser-stage row-shape errors return `invalid_pbn`. These include an invalid token, a row that does not contain four tokens, an incomplete non-final row, a row containing four `-` tokens, and placeholder syntax outside the supported final row.
+
+Context-dependent errors return `invalid_play_trace`. These include a real card after a missing chronological turn, a card in the wrong player's column, an impossible winner or leader transition, card ownership violations, duplicate played cards, and follow-suit violations.
 
 #### Legacy Inline `Play`
 
-Legacy inline `Play` contains an opening-leader `Direction`, a colon, and chronological cards:
+Legacy inline `Play` contains an optional opening-leader `Direction` prefix and chronological cards:
 
 ```pbn
+[Play ""]
+[Play "S3=S5"]
+[Play "E:"]
 [Play "E:S3=S5=S2=SQ H3=H5"]
+[Play "E:S3=S5=S2=SQ=H3=H5"]
 ```
 
-Cards within a trick are separated by `=` and tricks are separated by whitespace. Every group except the final group must contain exactly four cards. The final group may contain `1..=4` cards. Placeholders are not accepted. After validating group syntax, the `parser` retains the opening leader and one chronological card sequence; semantic `normalization` occurs after source merging.
+Whitespace and `=` delimit one chronological card sequence. Separators do not define trick boundaries; state advancement derives them from the final `deal`, `trump`, and `opening_leader`. A sequence may contain more than four cards without a whitespace boundary. Empty card tokens, malformed separators, invalid card tokens, and placeholders are rejected.
 
-An empty play sequence must use an empty standard `Play` section. An inline value containing both inline cards and following section data returns `invalid_pbn`.
+The optional direction prefix contributes `opening_leader` at the `PBN` source priority. Without a prefix, `opening_leader` remains absent and may be supplied separately or derived from the final `declarer`. An empty legacy sequence is valid when its opening leader can be resolved after source merging. An inline value containing following section data returns `invalid_pbn`.
 
 ## Section Boundaries And Unsupported Features
 
@@ -254,3 +267,5 @@ Missing final fields return `missing_field`. Contradictory final cross-field val
 - Supported but `endpoint`-inapplicable tags and sections return `invalid_pbn`.
 
 All final normalized input must be validated before reaching `DDS`.
+
+`Task 4` retains the fine-grained internal `Error` variants. `PbnParse`, `DuplicatePbnTag`, `InvalidPbnTag`, and `UnsupportedPbnFeature` later map to `invalid_pbn`; `InvalidDeal`, `InvalidPosition`, and `InvalidPlayTrace` map to their corresponding public codes. `ConflictingInput` maps to `conflicting_input`. The transport mapping itself remains a `Task 8` responsibility.

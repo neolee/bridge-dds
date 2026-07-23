@@ -145,28 +145,66 @@ fn test_position_clean_trick() {
 fn test_mid_trick_score_side_is_next_to_act() {
     DdsSolver::init();
     let hands = Hands::try_new([
-        one_suit_hand(Suit::Spades),
-        one_suit_hand(Suit::Hearts),
-        one_suit_hand(Suit::Diamonds),
-        one_suit_hand(Suit::Clubs),
+        Hand::from_cards(&[
+            Card::new(Suit::Spades, Rank::King),
+            Card::new(Suit::Spades, Rank::Nine),
+            Card::new(Suit::Diamonds, Rank::Queen),
+            Card::new(Suit::Diamonds, Rank::Eight),
+        ])
+        .unwrap(),
+        Hand::from_cards(&[
+            Card::new(Suit::Spades, Rank::Ten),
+            Card::new(Suit::Hearts, Rank::Ten),
+            Card::new(Suit::Hearts, Rank::Seven),
+            Card::new(Suit::Hearts, Rank::Six),
+        ])
+        .unwrap(),
+        Hand::from_cards(&[
+            Card::new(Suit::Spades, Rank::Seven),
+            Card::new(Suit::Spades, Rank::Three),
+            Card::new(Suit::Hearts, Rank::Nine),
+            Card::new(Suit::Hearts, Rank::Two),
+        ])
+        .unwrap(),
+        Hand::from_cards(&[
+            Card::new(Suit::Spades, Rank::Ace),
+            Card::new(Suit::Spades, Rank::Jack),
+            Card::new(Suit::Hearts, Rank::Jack),
+            Card::new(Suit::Diamonds, Rank::Six),
+        ])
+        .unwrap(),
     ])
     .unwrap();
     let ct = CurrentTrick::try_new(
-        Direction::North,
+        Direction::East,
         vec![
+            Card::new(Suit::Spades, Rank::Ten),
+            Card::new(Suit::Spades, Rank::Three),
             Card::new(Suit::Spades, Rank::Ace),
-            Card::new(Suit::Hearts, Rank::Ace),
         ],
     )
     .unwrap();
     let snap = SnapshotPosition::try_new(hands, ct).expect("snapshot");
     let play = PlayPosition::try_from(snap).unwrap();
-    assert_eq!(play.current_trick().leader(), Direction::North);
-    assert_eq!(play.current_trick().next_to_act(), Direction::South);
-    let results = DdsSolver::solve_position(&play, Strain::NoTrump).unwrap();
-    for r in &results {
-        assert_eq!(r.card.suit, Suit::Diamonds);
-    }
+    assert_eq!(play.current_trick().leader(), Direction::East);
+    assert_eq!(play.current_trick().next_to_act(), Direction::North);
+
+    let results = DdsSolver::solve_position(&play, Strain::Diamonds).unwrap();
+    assert_eq!(results.len(), 2);
+
+    let nine = results
+        .iter()
+        .find(|result| result.card == Card::new(Suit::Spades, Rank::Nine))
+        .unwrap();
+    assert_eq!(nine.tricks_for_score_side, 3);
+    assert!(nine.is_optimal);
+
+    let king = results
+        .iter()
+        .find(|result| result.card == Card::new(Suit::Spades, Rank::King))
+        .unwrap();
+    assert_eq!(king.tricks_for_score_side, 2);
+    assert!(!king.is_optimal);
 }
 
 #[test]
@@ -203,6 +241,8 @@ fn test_position_mid_trick_1_card() {
     let results = DdsSolver::solve_position(&play, Strain::NoTrump).unwrap();
     for r in &results {
         assert_eq!(r.card.suit, Suit::Hearts);
+        assert_eq!(r.tricks_for_score_side, 0);
+        assert!(r.is_optimal);
     }
 }
 
@@ -238,8 +278,9 @@ fn test_play_trace_import_one_card() {
     DdsSolver::init();
     let deal = pbn::parse_deal_tag(PBN[0]).unwrap();
     let (_, cards) = play::parse_play_tag("E:S3").unwrap();
-    let hands = Hands::try_new(deal.hands).unwrap();
-    let snap = SnapshotPosition::try_new(hands, CurrentTrick::empty(Direction::East)).unwrap();
+    let snap =
+        SnapshotPosition::try_new(deal.hands().clone(), CurrentTrick::empty(Direction::East))
+            .unwrap();
     let mut track = PlayPosition::try_from(snap).unwrap();
     track.play_card(cards[0], Strain::Spades).unwrap();
     assert_eq!(track.current_trick().len(), 1);
@@ -251,8 +292,9 @@ fn test_play_trace_import_complete_trick() {
     DdsSolver::init();
     let deal = pbn::parse_deal_tag(PBN[0]).unwrap();
     let (_, cards) = play::parse_play_tag("E:S3=S5=S2=SQ").unwrap();
-    let hands = Hands::try_new(deal.hands).unwrap();
-    let snap = SnapshotPosition::try_new(hands, CurrentTrick::empty(Direction::East)).unwrap();
+    let snap =
+        SnapshotPosition::try_new(deal.hands().clone(), CurrentTrick::empty(Direction::East))
+            .unwrap();
     let mut track = PlayPosition::try_from(snap).unwrap();
     for card in &cards {
         track.play_card(*card, Strain::Spades).unwrap();
@@ -268,8 +310,8 @@ fn test_residual_pbn_parsing() {
     let res = pbn::parse_residual_record(input).unwrap();
     assert_eq!(res.first.unwrap(), Direction::North);
     assert_eq!(res.trump.unwrap(), Strain::NoTrump);
-    assert_eq!(res.hands[0].len(), 4); // N has 4 spades
-    assert_eq!(res.hands[1].len(), 4); // E has 4 hearts
+    assert_eq!(res.hands.get(Direction::North).len(), 4);
+    assert_eq!(res.hands.get(Direction::East).len(), 4);
 }
 
 #[test]
