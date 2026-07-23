@@ -284,13 +284,27 @@ impl TryFrom<&PlayPosition> for SnapshotPosition {
     }
 }
 
-// --- Internal helper types ---
+// --- Validated play events and trick evaluation ---
 
-/// A card played by a specific player. Used only by `trick_winner`.
+/// A validated card played by a specific player.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayedCard {
     player: Direction,
     card: Card,
+}
+
+impl PlayedCard {
+    pub(crate) fn new(player: Direction, card: Card) -> Self {
+        Self { player, card }
+    }
+
+    pub fn player(&self) -> Direction {
+        self.player
+    }
+
+    pub fn card(&self) -> Card {
+        self.card
+    }
 }
 
 /// Determine the winner of a complete 4-card trick.

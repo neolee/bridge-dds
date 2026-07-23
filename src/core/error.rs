@@ -45,6 +45,9 @@ pub enum Error {
     #[error("invalid play trace: {0}")]
     InvalidPlayTrace(String),
 
+    #[error("conflicting input: {0}")]
+    ConflictingInput(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

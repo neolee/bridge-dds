@@ -1,6 +1,7 @@
 use std::io::Read;
 
 use bridge_dds::core::deal::{Direction, Strain};
+use bridge_dds::core::pbn::{ParsedPlay, ParsedRecord};
 use bridge_dds::core::position::{CurrentTrick, PlayPosition, SnapshotPosition};
 use bridge_dds::core::{self, Error};
 use bridge_dds::dds::DdsSolver;
@@ -78,18 +79,23 @@ fn cmd_solve(
     std::io::stdin().read_to_string(&mut input)?;
 
     DdsSolver::init();
+    let record = core::pbn::parse_record(&input)?;
 
-    // Try residual path first: if Position tag is present.
-    if input.contains("[Position ") {
-        return cmd_residual(format, trump_arg, first_arg, matrix, &input);
+    if record.position.is_some() {
+        return cmd_residual(format, trump_arg, first_arg, matrix, record);
     }
 
-    // Full-deal path. If a Play tag is present, route to play trace analysis.
-    if input.contains("[Play ") {
-        return cmd_play_trace(format, trump_arg, declarer_arg, &input);
+    if record.play.is_some() {
+        return cmd_play_trace(format, trump_arg, declarer_arg, record);
     }
 
-    let board = core::pbn::parse_record(&input)?;
+    let board = core::deal::Board {
+        deal: record.deal.ok_or(Error::MissingPbnTag("Deal"))?,
+        dealer: record.dealer.ok_or(Error::MissingPbnTag("Dealer"))?,
+        vulnerable: record
+            .vulnerable
+            .ok_or(Error::MissingPbnTag("Vulnerable"))?,
+    };
     let table = DdsSolver::solve_table(&board.deal)?;
     let par = DdsSolver::compute_par(&table, board.dealer, board.vulnerable)?;
 
@@ -106,33 +112,56 @@ fn cmd_residual(
     trump_arg: Option<String>,
     first_arg: Option<String>,
     matrix: bool,
-    input: &str,
+    record: ParsedRecord,
 ) -> Result<(), Error> {
-    let residual = core::pbn::parse_residual_record(input)?;
+    let hands = record.position.ok_or(Error::MissingPbnTag("Position"))?;
 
     // Resolve first: CLI overrides PBN tag. Must come from at least one source.
     let first = if let Some(ref f) = first_arg {
         let ch = f.trim().chars().next().unwrap_or(' ');
         Direction::from_char(ch).ok_or_else(|| Error::InvalidFirst(f.clone()))?
-    } else if let Some(f) = residual.first {
+    } else if let Some(f) = record.first {
         f
     } else {
         return Err(Error::MissingPbnTag("First"));
     };
 
-    // Build CurrentTrick: derive leader from the first card's player.
-    let ct = if residual.current_trick.is_empty() {
+    let parsed_current_trick = record
+        .current_trick
+        .map(|current| current.cards)
+        .unwrap_or_default();
+    let ct = if parsed_current_trick.is_empty() {
         CurrentTrick::empty(first)
     } else {
-        let leader = residual.current_trick[0].0;
-        let cards: Vec<_> = residual.current_trick.iter().map(|(_, c)| *c).collect();
+        let leader = parsed_current_trick[0].player;
+        let expected_first = leader.advance(parsed_current_trick.len());
+        if first != expected_first {
+            return Err(Error::ConflictingInput(format!(
+                "First {} does not match CurrentTrick next player {}",
+                first.as_char(),
+                expected_first.as_char()
+            )));
+        }
+        for directed in &parsed_current_trick {
+            if !hands.get(directed.player).contains(directed.card) {
+                return Err(Error::InvalidPosition(format!(
+                    "CurrentTrick: {:?} does not hold {}",
+                    directed.player,
+                    directed.card.to_pbn()
+                )));
+            }
+        }
+        let cards: Vec<_> = parsed_current_trick
+            .iter()
+            .map(|directed| directed.card)
+            .collect();
         CurrentTrick::try_new(leader, cards)?
     };
 
-    let snap = SnapshotPosition::try_new(residual.hands, ct)?;
+    let snap = SnapshotPosition::try_new(hands, ct)?;
 
     // Resolve trump: CLI overrides PBN tag.
-    let trump_str = trump_arg.or(residual.trump.map(|s| s.as_char().to_string()));
+    let trump_str = trump_arg.or(record.trump.map(|s| s.as_char().to_string()));
 
     if matrix {
         let pm = DdsSolver::solve_position_matrix(&snap)?;
@@ -167,43 +196,58 @@ fn cmd_play_trace(
     format: OutputFormat,
     trump_arg: Option<String>,
     declarer_arg: Option<String>,
-    input: &str,
+    record: ParsedRecord,
 ) -> Result<(), Error> {
-    let board = core::pbn::parse_record(input)?;
+    let deal = record.deal.ok_or(Error::MissingPbnTag("Deal"))?;
+    let play = record.play.ok_or(Error::MissingPbnTag("Play"))?;
 
-    let trump_s = trump_arg
-        .ok_or_else(|| Error::InvalidTrump("--trump is required for Play trace analysis".into()))?;
-    let trump = Strain::from_char(trump_s.chars().next().unwrap_or(' '))
-        .ok_or_else(|| Error::InvalidTrump(trump_s.clone()))?;
-
-    let play_value = extract_tag_value(input, "Play")?;
-    let (tag_leader, cards) = core::play::parse_play_tag(&play_value)?;
-
-    let opening_leader = if let Some(tl) = tag_leader {
-        tl
+    let trump = if let Some(trump_s) = trump_arg {
+        Strain::from_char(trump_s.chars().next().unwrap_or(' '))
+            .ok_or_else(|| Error::InvalidTrump(trump_s.clone()))?
+    } else if let Some(contract) = record.contract {
+        contract.strain
     } else {
-        let declarer_s = declarer_arg.ok_or_else(|| {
-            Error::Dds("--declarer is required when Play tag has no direction prefix".into())
-        })?;
-        let declarer = Direction::from_char(declarer_s.chars().next().unwrap_or(' '))
-            .ok_or_else(|| Error::Dds(format!("invalid declarer: {}", declarer_s)))?;
-        declarer.next()
+        return Err(Error::InvalidTrump(
+            "--trump is required for Play trace analysis".into(),
+        ));
     };
 
-    let snap = SnapshotPosition::try_new(
-        board.deal.hands().clone(),
-        CurrentTrick::empty(opening_leader),
-    )?;
-    let mut track = PlayPosition::try_from(snap)?;
+    let declarer = if let Some(declarer_s) = declarer_arg {
+        Some(
+            Direction::from_char(declarer_s.chars().next().unwrap_or(' '))
+                .ok_or_else(|| Error::Dds(format!("invalid declarer: {}", declarer_s)))?,
+        )
+    } else {
+        record.declarer
+    };
 
-    for card in &cards {
-        track
-            .play_card(*card, trump)
-            .map_err(|e| Error::InvalidPlayTrace(format!("card {}: {}", card.to_pbn(), e)))?;
+    let opening_leader = match &play {
+        ParsedPlay::Standard { first_column, .. } => *first_column,
+        ParsedPlay::Legacy {
+            opening_leader: Some(leader),
+            ..
+        } => *leader,
+        ParsedPlay::Legacy {
+            opening_leader: None,
+            ..
+        } => declarer.map(Direction::next).ok_or_else(|| {
+            Error::Dds("--declarer is required when Play tag has no direction prefix".into())
+        })?,
+    };
+    if let Some(declarer) = declarer {
+        let expected = declarer.next();
+        if opening_leader != expected {
+            return Err(Error::ConflictingInput(format!(
+                "Play opening leader {} does not follow declarer {}",
+                opening_leader.as_char(),
+                declarer.as_char()
+            )));
+        }
     }
 
-    let results = DdsSolver::solve_position(&track, trump)?;
-    let snap_out = SnapshotPosition::try_from(&track)?;
+    let normalized = core::play::normalize_play(&play, &deal, trump, opening_leader)?;
+    let results = DdsSolver::solve_position(normalized.final_position(), trump)?;
+    let snap_out = SnapshotPosition::try_from(normalized.final_position())?;
 
     match format {
         OutputFormat::Text => print_text_continuation(&snap_out, trump, &results),
@@ -211,23 +255,4 @@ fn cmd_play_trace(
     }
 
     Ok(())
-}
-
-fn extract_tag_value(input: &str, tag: &str) -> Result<String, Error> {
-    for line in input.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with(&format!("[{} ", tag)) || line.starts_with(&format!("[{}\t", tag)) {
-            let start = line
-                .find('"')
-                .ok_or_else(|| Error::PbnParse(format!("missing quote in {} tag", tag)))?;
-            let end = line
-                .rfind('"')
-                .ok_or_else(|| Error::PbnParse(format!("missing closing quote in {} tag", tag)))?;
-            return Ok(line[start + 1..end].to_string());
-        }
-    }
-    Err(Error::PbnParse(format!("missing {} tag", tag)))
 }

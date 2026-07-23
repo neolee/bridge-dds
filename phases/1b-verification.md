@@ -200,7 +200,11 @@ echo '[Position "N:AKQJ... .AKQJ.. ..AKQJ. ...AKQJ"]
 ' | cargo run -- solve --trump NT
 ```
 
-Expected: `error: invalid position: SnapshotPosition: South does not hold SA (current trick card 2)`.
+Expected: `error: invalid position: CurrentTrick: expected S as player 2, got N`.
+
+This error is now rejected by the shared `PBN` parser before `SnapshotPosition`
+construction. After leader `E`, player `S` is required in the second position;
+the supplied player `N` violates clockwise order.
 
 ### 11. --first overrides [First] tag
 

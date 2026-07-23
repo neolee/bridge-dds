@@ -41,6 +41,13 @@ const VUL: [u8; 3] = [0, 2, 0]; // None=0, NS=2, None=0
 const DEALER_SCORE: [i32; 3] = [-110, 100, -300];
 const DEALER_CONTRACT: [[&str; 1]; 3] = [["2S-EW"], ["4S*-EW-1"], ["5H*-NS-2"]];
 
+fn parse_deal(value: &str) -> core::deal::Deal {
+    core::pbn::parse_record(&format!("[Deal \"{}\"]", value))
+        .unwrap()
+        .deal
+        .unwrap()
+}
+
 #[test]
 fn test_dds_table_deal_0() {
     test_deal(0);
@@ -59,7 +66,7 @@ fn test_dds_table_deal_2() {
 fn test_deal(idx: usize) {
     DdsSolver::init();
 
-    let deal = core::pbn::parse_deal_tag(PBN[idx]).unwrap();
+    let deal = parse_deal(PBN[idx]);
     let table = DdsSolver::solve_table(&deal).unwrap();
 
     // Verify all 20 trick values.
@@ -276,60 +283,79 @@ fn test_position_mid_trick_3_cards() {
 #[test]
 fn test_play_trace_import_one_card() {
     DdsSolver::init();
-    let deal = pbn::parse_deal_tag(PBN[0]).unwrap();
-    let (_, cards) = play::parse_play_tag("E:S3").unwrap();
-    let snap =
-        SnapshotPosition::try_new(deal.hands().clone(), CurrentTrick::empty(Direction::East))
-            .unwrap();
-    let mut track = PlayPosition::try_from(snap).unwrap();
-    track.play_card(cards[0], Strain::Spades).unwrap();
-    assert_eq!(track.current_trick().len(), 1);
-    assert_eq!(track.current_trick().next_to_act(), Direction::South);
+    let deal = parse_deal(PBN[0]);
+    let parsed = pbn::parse_record("[Play \"E:S3\"]").unwrap();
+    let normalized = play::normalize_play(
+        parsed.play.as_ref().unwrap(),
+        &deal,
+        Strain::Spades,
+        Direction::East,
+    )
+    .unwrap();
+    assert_eq!(normalized.final_position().current_trick().len(), 1);
+    assert_eq!(
+        normalized.final_position().current_trick().next_to_act(),
+        Direction::South
+    );
 }
 
 #[test]
 fn test_play_trace_import_complete_trick() {
     DdsSolver::init();
-    let deal = pbn::parse_deal_tag(PBN[0]).unwrap();
-    let (_, cards) = play::parse_play_tag("E:S3=S5=S2=SQ").unwrap();
-    let snap =
-        SnapshotPosition::try_new(deal.hands().clone(), CurrentTrick::empty(Direction::East))
-            .unwrap();
-    let mut track = PlayPosition::try_from(snap).unwrap();
-    for card in &cards {
-        track.play_card(*card, Strain::Spades).unwrap();
-    }
-    assert!(track.current_trick().is_empty());
-    assert_eq!(track.current_trick().next_to_act(), Direction::North);
+    let deal = parse_deal(PBN[0]);
+    let parsed = pbn::parse_record("[Play \"E:S3=S5=S2=SQ\"]").unwrap();
+    let normalized = play::normalize_play(
+        parsed.play.as_ref().unwrap(),
+        &deal,
+        Strain::Spades,
+        Direction::East,
+    )
+    .unwrap();
+    assert!(normalized.final_position().current_trick().is_empty());
+    assert_eq!(
+        normalized.final_position().current_trick().next_to_act(),
+        Direction::North
+    );
 }
 
 #[test]
 fn test_residual_pbn_parsing() {
     let input = "\
 [Position \"N:AKQJ... .AKQJ.. ..AKQJ. ...AKQJ\"]\n[First \"N\"]\n[Trump \"NT\"]\n";
-    let res = pbn::parse_residual_record(input).unwrap();
+    let res = pbn::parse_record(input).unwrap();
     assert_eq!(res.first.unwrap(), Direction::North);
     assert_eq!(res.trump.unwrap(), Strain::NoTrump);
-    assert_eq!(res.hands.get(Direction::North).len(), 4);
-    assert_eq!(res.hands.get(Direction::East).len(), 4);
+    assert_eq!(
+        res.position.as_ref().unwrap().get(Direction::North).len(),
+        4
+    );
+    assert_eq!(res.position.as_ref().unwrap().get(Direction::East).len(), 4);
 }
 
 #[test]
 fn test_residual_pbn_with_current_trick() {
     let input = "\
 [Position \"N:AKQJ... .AKQJ.. ..AKQJ. ...AKQJ\"]\n[First \"E\"]\n[Trump \"NT\"]\n[CurrentTrick \"N:SA\"]\n";
-    let res = pbn::parse_residual_record(input).unwrap();
+    let res = pbn::parse_record(input).unwrap();
     assert_eq!(res.first.unwrap(), Direction::East);
-    assert_eq!(res.current_trick.len(), 1);
-    assert_eq!(res.current_trick[0].0, Direction::North);
-    assert_eq!(res.current_trick[0].1, Card::new(Suit::Spades, Rank::Ace));
+    let current_trick = res.current_trick.unwrap();
+    assert_eq!(current_trick.cards.len(), 1);
+    assert_eq!(current_trick.cards[0].player, Direction::North);
+    assert_eq!(
+        current_trick.cards[0].card,
+        Card::new(Suit::Spades, Rank::Ace)
+    );
 }
 
 #[test]
 fn test_residual_pbn_current_trick_invalid_card() {
     let input = "\
 [Position \"N:AKQJ... .AKQJ.. ..AKQJ. ...AKQJ\"]\n[First \"W\"]\n[Trump \"NT\"]\n[CurrentTrick \"N:SA E:S2\"]\n";
-    let err = pbn::parse_residual_record(input).unwrap_err();
+    let parsed = pbn::parse_record(input).unwrap();
+    let current = parsed.current_trick.unwrap();
+    let cards: Vec<_> = current.cards.iter().map(|directed| directed.card).collect();
+    let trick = CurrentTrick::try_new(current.cards[0].player, cards).unwrap();
+    let err = SnapshotPosition::try_new(parsed.position.unwrap(), trick).unwrap_err();
     assert!(err.to_string().contains("East does not hold S2"));
 }
 
@@ -338,22 +364,37 @@ fn test_residual_pbn_current_trick_invalid_card() {
 use bridge_dds::core::play;
 
 #[test]
-fn test_parse_play_tag_with_prefix() {
-    let (leader, cards) = play::parse_play_tag("W:S6=S4=SJ=SQ").unwrap();
-    assert_eq!(leader, Some(Direction::West));
-    assert_eq!(cards.len(), 4);
+fn test_unified_parser_legacy_play_with_prefix() {
+    let parsed = pbn::parse_record("[Play \"W:S6=S4=SJ=SQ\"]").unwrap();
+    assert!(matches!(
+        parsed.play,
+        Some(pbn::ParsedPlay::Legacy {
+            opening_leader: Some(Direction::West),
+            cards
+        }) if cards.len() == 4
+    ));
 }
 
 #[test]
-fn test_parse_play_tag_without_prefix() {
-    let (leader, cards) = play::parse_play_tag("S6=S4=SJ=SQ").unwrap();
-    assert_eq!(leader, None);
-    assert_eq!(cards.len(), 4);
+fn test_unified_parser_legacy_play_without_prefix() {
+    let parsed = pbn::parse_record("[Play \"S6=S4=SJ=SQ\"]").unwrap();
+    assert!(matches!(
+        parsed.play,
+        Some(pbn::ParsedPlay::Legacy {
+            opening_leader: None,
+            cards
+        }) if cards.len() == 4
+    ));
 }
 
 #[test]
-fn test_parse_play_tag_multi_trick() {
-    let (leader, cards) = play::parse_play_tag("N:SA=HK=DQ=CJ S2=H3=D4=C5").unwrap();
-    assert_eq!(leader, Some(Direction::North));
-    assert_eq!(cards.len(), 8);
+fn test_unified_parser_legacy_play_multi_trick() {
+    let parsed = pbn::parse_record("[Play \"N:SA=HK=DQ=CJ S2=H3=D4=C5\"]").unwrap();
+    assert!(matches!(
+        parsed.play,
+        Some(pbn::ParsedPlay::Legacy {
+            opening_leader: Some(Direction::North),
+            cards
+        }) if cards.len() == 8
+    ));
 }
