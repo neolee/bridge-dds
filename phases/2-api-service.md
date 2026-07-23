@@ -139,7 +139,7 @@ HTTP status codes: `400` for input/validation errors, `413` for body too large, 
 
 ### 6. Server Runtime
 
-- `bridge-server` calls `DdsSolver::init()` once at startup.
+- `bridge-server` calls the public application-level `initialize_solver()` once at startup; the low-level `DdsSolver` remains internal.
 - An `async` worker task holds a bounded `mpsc::Receiver<SolveJob>`. Each `SolveJob` carries a request payload and a `oneshot::Sender` for the response.
 - On receiving a job, the worker calls `tokio::task::spawn_blocking()` to run the synchronous application/`DDS` call. The result is sent back through the `oneshot` channel.
 - If the `oneshot` receiver is already closed (request timed out), the worker skips the job before calling `spawn_blocking`. An already-started `DDS` call cannot be cancelled.
@@ -706,7 +706,7 @@ pub enum ParsedPlay {
 pub fn parse_record(input: &str) -> Result<ParsedRecord, Error>;
 ```
 
-`ParsedCurrentTrick` retains unvalidated player/card pairs. `ParsedContract` retains level, strain, and doubling. `ParsedAuction` retains its first direction and tokenized calls. The full supporting type shapes are specified in `phases/2-task-4-pre-tasks.md`.
+`ParsedCurrentTrick` retains player/card pairs after intrinsic entry-count, clockwise-order, and duplicate-card validation. Ownership, follow-suit, and cross-field validation remain post-merge responsibilities. `ParsedContract` retains level, strain, and doubling. `ParsedAuction` retains its first direction and tokenized calls. The full supporting type shapes are specified in `phases/2a-task-4-pre-tasks.md`.
 
 Implement these normalization boundaries in `src/core/play.rs`:
 
@@ -729,7 +729,7 @@ pub fn normalize_play(
 
 Keep fine-grained internal `Error` variants through `Task 4`. Add `ConflictingInput(String)` for contradictory final fields. `Task 8` maps internal variants to the stable public error protocol; parser and normalization code must not depend on `HTTP` types.
 
-During `Task 4`, the `CLI` parses once and preserves its existing operation precedence (`Position`, then `Play`, then full deal), argument names, and non-contradictory behavior. Final endpoint applicability is completed by `Task 6` and `Task 8`.
+During `Task 4`, the `CLI` parses once and preserves its existing operation precedence (`Position`, then `Play`, then full deal), argument names, and non-contradictory behavior. `Task 6` moves `CLI` source resolution into a shared input layer while preserving `CLI` compatibility. `Task 8` applies the stricter per-`endpoint` applicability rules to future `HTTP` requests.
 
 ### Task 5: Define Shared Application Use Cases
 
@@ -738,76 +738,201 @@ Create `src/application/` with:
 ```text
 src/application/
 ├── mod.rs
-├── deal.rs          # AnalyzeDeal
-├── position.rs      # AnalyzePositionMatrix, AnalyzeContinuation
-└── play.rs          # AnalyzePlay (Phase 2b: full; Phase 2a: advancement + final state)
+├── deal.rs
+├── position.rs
+└── play.rs
 ```
 
-Each module exposes a use-case function returning a strong-typed result. The application layer must not import `axum`, `HTTP` status codes, `Json`, or `serde_json::Value`.
+Define the application commands, results, and functions explicitly:
+
+```rust
+pub struct AnalyzeDeal {
+    pub deal: Deal,
+    pub dealer: Direction,
+    pub vulnerable: Vulnerability,
+}
+
+pub struct DealAnalysis {
+    pub tricks: TricksMatrix,
+    pub par: ParResult,
+}
+
+pub struct AnalyzePositionMatrix {
+    pub hands: Hands,
+}
+
+pub struct PositionMatrixAnalysis {
+    values: [[u8; 4]; 5],
+}
+
+pub struct AnalyzeContinuation {
+    pub position: SnapshotPosition,
+    pub trump: Strain,
+}
+
+pub struct SuggestedCard {
+    pub card: Card,
+    pub tricks_for_score_side: u8,
+    pub is_optimal: bool,
+}
+
+pub struct ContinuationAnalysis {
+    pub position: SnapshotPosition,
+    pub trump: Strain,
+    pub score_side: Side,
+    pub suggested: Vec<SuggestedCard>,
+}
+
+pub struct AnalyzeFinalPlay {
+    pub normalized: NormalizedPlay,
+    pub trump: Strain,
+}
+
+pub struct FinalPlayAnalysis {
+    pub final_position: SnapshotPosition,
+    pub final_continuation: Option<ContinuationAnalysis>,
+}
+
+pub fn analyze_deal(command: AnalyzeDeal) -> Result<DealAnalysis, Error>;
+pub fn analyze_position_matrix(
+    command: AnalyzePositionMatrix,
+) -> Result<PositionMatrixAnalysis, Error>;
+pub fn analyze_continuation(
+    command: AnalyzeContinuation,
+) -> Result<ContinuationAnalysis, Error>;
+pub fn analyze_final_play(
+    command: AnalyzeFinalPlay,
+) -> Result<FinalPlayAnalysis, Error>;
+pub fn initialize_solver();
+```
+
+The exact field visibility may use constructors and read-only accessors, but the ownership and responsibilities must remain as shown. `PositionMatrixAnalysis` exposes typed accessors rather than its raw layout. Public application results must not expose `DDS` `FFI` structs or solver-specific raw result types.
+
+Application commands and results derive `Debug`, `Clone`, and `PartialEq` where their fields support those traits so tests can compare typed values directly.
+
+The application layer must not import `axum`, `HTTP` status codes, `Json`, or `serde_json::Value`. Every use case calls the internal `DdsSolver::init()` through its idempotent `Once` boundary so direct application callers cannot accidentally use an uninitialized solver. `initialize_solver()` exposes the same idempotent initialization through the application facade so `bridge-server` can initialize eagerly at startup.
+
+All validation required by an application command is present when the use case is first introduced. In particular, `AnalyzePositionMatrix` rejects unequal hand counts before calling `DDS`, and `AnalyzeContinuation` accepts only a validated `SnapshotPosition`.
 
 `Task 4` supplies validated play normalization, chronological events, state advancement, and the final `PlayPosition`. `Task 5` consumes that result to expose internal `final_position` and `final_continuation` results without parsing or advancing the cards again. The full `AnalyzePlay` use case returning `PlayAnalysis` (with historical `trace`) is completed in `Phase 2b`.
 
-### Task 6: Refactor CLI To Use Shared Application Use Cases
+`analyze_final_play()` converts `NormalizedPlay::final_position()` to one `SnapshotPosition` and reuses the continuation use case. It must not replay `NormalizedPlay::played_cards()`. When all cards have been played and no legal continuation exists, `final_continuation` is `None`; the application must not call `SolveBoardPBN` on a terminal position. `Phase 2a` does not define or serialize a partial public play-response `DTO`.
 
-After the shared application use cases exist, refactor `src/cli/main.rs` so every `CLI` operation delegates normalization, validation, and solving to the application layer:
+### Task 6: Define Shared Input Normalization And Refactor `CLI`
+
+Create a transport-neutral input layer before moving orchestration out of the `CLI`:
+
+```text
+src/input/
+├── mod.rs
+├── fields.rs        # source-neutral optional fields
+├── merge.rs         # field-level precedence and conflicts
+└── command.rs       # operation-specific application command builders
+```
+
+This layer contains no `axum`, `HTTP` status, or `serde_json::Value` dependency. It accepts already parsed source fields, applies field-level precedence, performs final cross-field validation, and builds the `Task 5` application commands. `Task 6` implements the `CLI` source policy `CLI arguments > PBN`; `Task 8` later supplies `URL query > JSON body > PBN` to the same merger.
+
+Refactor `src/cli/main.rs` so every `CLI` operation uses the shared input layer and delegates solving to the application layer:
 
 - Full-deal analysis calls `AnalyzeDeal`.
 - Position matrix calls `AnalyzePositionMatrix`.
 - Continuation calls `AnalyzeContinuation`.
-- Play-trace import uses the shared Phase 2a play normalization and advancement path to produce the final position and continuation.
+- Play-trace import normalizes once and calls `AnalyzeFinalPlay`.
 - Remove duplicated solver orchestration and play advancement from the `CLI`.
 - Keep argument parsing, `stdin` reading, operation selection, and text rendering in the `CLI` adapter.
+- Keep one `parse_record()` call and the existing operation precedence: `Position`, then `Play`, then full deal.
 
-This task must preserve the correctness fixes from Tasks 1 and 2. It removes remaining duplicated orchestration after the known CLI correctness bugs have already been fixed.
+`CLI` compatibility is distinct from future `HTTP` endpoint applicability:
 
-### Task 7: Harden Solver Boundaries
+- Preserve all existing option names and non-contradictory behavior for `--trump`, `--first`, `--declarer`, `--matrix`, and `--format`.
+- Existing matrix calls containing `[First]` or `--first` remain accepted. `AnalyzePositionMatrix` receives only `Hands`; the compatibility-only value is validated and then discarded. Omitting `First` for matrix analysis may become valid as an additive behavior.
+- Do not make existing `CLI` calls fail merely because an otherwise harmless field is inapplicable to the corresponding future `HTTP` endpoint.
+- Keep the correctness fixes from Tasks 1, 2, and 4, including `CurrentTrick` order validation and `declarer`/`opening_leader` conflict detection.
 
-Ensure all public application calls validate before reaching `DDS`:
+After this task, `src/cli/main.rs` must not call `DdsSolver` directly, construct application results, duplicate position normalization, or implement a second field-merging path.
+
+### Task 7: Audit Domain, Application, And `DDS` Boundaries
+
+Audit the `Task 5` boundaries and remove remaining ways to bypass them:
 
 - `Hands` general invariants: at most `13` cards per hand and no cross-hand duplicates.
 - Full-deal completeness: exactly `13` cards per hand and `52` total.
 - Snapshot and matrix equal-hand-count requirements.
 - `current_trick` length `0..3`, card ownership, play order, and follow-suit.
 - `CurrentTrick` derives player sequence and `next_to_act` from `trick_leader`.
-- `declarer` and `opening_leader` cross-validation.
-- Each `endpoint`'s distinct constraints.
+- `DdsSolver::solve_position_matrix()` accepts validated matrix `Hands`, not a semantically unrelated `SnapshotPosition` with a fabricated leader.
+- Low-level `DdsSolver` methods and raw `DDS` result types become `pub(crate)`; the application layer is the public solving facade.
+- Existing external solver integration tests migrate to application calls. Private conversion and `FFI` boundary tests remain next to the solver.
+- Successful `DDS` output is range-checked before indexing arrays or converting signed counts and scores to unsigned values.
+- `DDS_LOCK` poisoning and impossible `DDS` metadata return `Error` rather than panic.
 
-The `CLI`, future `HTTP` handlers, and any direct application callers receive the same validation behavior because validation lives at domain construction and application-use-case boundaries.
+Source precedence, `declarer`/`opening_leader` conflicts, and endpoint applicability do not belong in the solver. They remain in the shared input and transport layers. The `CLI`, future `HTTP` handlers, and direct application callers receive the same domain and solver safety because validation lives at domain construction and application-use-case boundaries.
 
-### Task 8: Define Transport DTOs And Input Merging
+### Task 8: Define Request DTOs, Public Errors, And Transport Merging
 
-Transport `DTO`s and conversion layer:
+Create `src/transport/` without importing `axum`:
 
-- Reject unknown `JSON` fields and explicit `null`.
+```text
+src/transport/
+├── mod.rs
+├── error.rs         # stable transport-neutral error codes
+└── request.rs       # endpoint-specific JSON body and query DTOs
+```
+
+Define independent body and query `DTO`s for each endpoint. Use `#[serde(deny_unknown_fields)]` and a shared deserializer that distinguishes an omitted field from an explicit `null`; omitted means absent, while `null` returns `invalid_request`.
+
+The request conversion layer must:
+
 - Parse and perform syntax and intrinsic field-value validation on every provided source before merge; invalid lower-priority input is not hidden by a valid override.
-- Parse `PBN` via the unified parser (Task 4).
+- Parse `PBN` only through `parse_record()`.
+- Parse public `JSON` and query values using the canonical case-sensitive forms in this document.
+- Provide a `pub(crate)` Deal-value parser for the standalone JSON `deal` field rather than synthesizing a `[Deal "..."]` record. `parse_record()` remains the only public record parser.
 - Accept `JSON body` standalone fields and allowed `URL query` fields.
 - Merge by field-level `query > body > PBN` priority.
-- After merging, run all cross-field semantic validation (e.g. `declarer` vs `opening_leader`) and final normalized-invariant validation.
-- Convert to application commands.
+- Reject supported but endpoint-inapplicable `PBN`, body, and query fields.
+- Feed the merged fields into the shared `Task 6` command builders.
+- Preserve a standard `Play` section's immutable `first_column` when a higher-priority source overrides `opening_leader`.
+- Add and test `Direction::previous()` for `opening_leader -> declarer`; do not duplicate inverse-direction arithmetic in transport code.
 
-### Task 9: Sync CLI JSON With API Response DTOs
+`Task 8` also defines the stable transport-neutral error-code mapping from internal `Error` variants to the minimum public codes in this document. It does not assign `HTTP` status codes or implement `IntoResponse`; `Phase 2b Task 4` maps these errors to statuses and middleware responses.
 
-For the three complete `Phase 2a` use cases (`deal`, position matrix, and continuation), `CLI --format json` must serialize the same response types later used by the `HTTP API`. Both the `CLI` and future `HTTP` handler receive the same application result and serialize through the same `DTO`s.
+Tests cover every endpoint independently, all source combinations, explicit `null`, unknown fields, applicability, parse-before-merge, valid conflict resolution by override, and rejection of contradictory final values.
+
+### Task 9: Define Shared Response DTOs And Stable Output Order
+
+Add strong response types to `src/transport/response.rs` for the three complete `Phase 2a` use cases: deal, position matrix, and continuation. Derive `Serialize`, `Deserialize`, `Debug`, and `PartialEq` so future `HTTP` and current `CLI` tests compare typed values rather than raw `serde_json::Value` trees.
+
+Response conversion implements the final stable order before any new golden fixture is recorded:
+
+- Cards in `hands` arrays: suits in `SHDC` order and descending rank within each suit.
+- `suggested`: descending by `tricks_for_score_side`, then suit in `SHDC` order, then rank descending.
+- Equivalent cards from the `equals` bitmask are expanded, deduplicated, and sorted by the same comparator.
+- `par.contracts` remain in `DDS` order.
+
+For these three use cases, `CLI --format json` serializes the exact response types later used by the `HTTP API`. The response types include the documented `matrix` and `continuation` outer fields; they do not use `serde_json::Value` internally.
 
 - `CLI` text output remains independently formatted.
 - Pre-refactoring `CLI` JSON fixtures are not required to stay byte-identical; they are updated to match the final `API` spec.
 - Text fixtures stay byte-identical unless a correctness fix changes them.
 - Full play-analysis JSON synchronization is completed in `Phase 2b` when the final `PlayAnalysis` result exists.
+- `Phase 2a` does not expose a partial play response with an empty or fabricated `trace`.
 
-### Task 10: Define Stable Output Order
+Stable ordering is a response-conversion responsibility. Do not reorder low-level `DDS` results merely to format `JSON`; this keeps existing text output independent from the public array order.
 
-Document and implement:
+### Task 10: Lock Response Contracts And Golden Fixtures
 
-- Cards in `hands` arrays: descending rank within each suit, suits in `SHDC` order.
-- `suggested` array: descending by `tricks_for_score_side`, then by suit in `SHDC` order, then by card rank descending.
-- Equivalent cards (from `equals` bitmask) are expanded and follow the same deterministic suit/rank ordering.
-- `par.contracts` preserved in `DDS` order.
+- Add typed serialization round-trip tests for every `Phase 2a` response `DTO`.
+- Add structural golden fixtures for `CLI --format json`, including the required `matrix` and `continuation` wrappers.
+- Add byte-identical text fixtures for existing full-deal, matrix, continuation, prefixed legacy play, and unprefixed legacy play output.
+- Record any intentional JSON migration from the pre-`Phase 2a` shape. This task must not introduce a second sorting implementation or change the comparators defined in `Task 9`.
 
 ### Task 11: Update Project Documents
 
-- `PLAN.md`: reclassify `AnalysePlayPBN` historical evaluation from `Phase 1b` to `Phase 2b`, mark `Phase 1b` complete, reflect `Phase 2a`/`2b` task structure.
-- `phases/1b-verification.md`: update case 10's expected error to the parser-stage `CurrentTrick` player-order rejection introduced by Task 4.
+- `PLAN.md`: mark `Phase 1b` complete, record completed `Phase 2a` work, replace the obsolete `/api/solve` and `/api/analyze` entries with the four accepted endpoint contracts, and keep `AnalysePlayPBN` historical evaluation in `Phase 2b`.
+- `INIT.md`: remove the outdated suggestion that `AnalysePlayPBN` belongs to `Phase 1b` and describe the application layer as the public solving facade.
+- `README.md`: describe only currently available binaries and behavior; keep `bridge-server` and the self-contained web application identified as future `Phase 2b`/`Phase 3` work until implemented.
+- Verify links to `phases/2a-task-4-pre-tasks.md` and `phases/2a-task-4-verification.md`.
+- Do not repeat the `phases/1b-verification.md` case `10` update; it was completed by `Task 4`.
 
 ### Task 12: Phase 2a Verification
 
@@ -819,18 +944,27 @@ Automated:
 - `Hands` / `CurrentTrick` / `SnapshotPosition` / `PlayPosition` invariant tests.
 - Unified `PBN` parser tests for all supported tags, standard and legacy play forms, fixed player columns, legal incomplete-final-trick placeholders, supported section data, and error paths.
 - Application use-case tests (3 complete use cases + play advancement/final-state tests).
-- Transport `DTO`, input merging, override, and conflict tests.
+- Empty-play and complete-`52`-card terminal-play tests; terminal play returns no continuation and does not call `SolveBoardPBN`.
+- Shared `CLI` input tests for argument priority, legacy option compatibility, and operation precedence.
+- Transport request `DTO`, explicit-`null`, unknown-field, applicability, input-merging, override, and conflict tests.
 - Parse-before-merge tests proving invalid syntax or intrinsically invalid lower-priority `PBN`/body fields are rejected even when a higher-priority source provides a valid override.
 - Post-merge semantic tests proving a higher-priority override may resolve a lower-priority cross-field conflict, while contradictory final values are rejected.
 - Four-direction `declarer -> opening_leader` and `opening_leader -> declarer` derivation tests, including same-source and cross-source conflict cases.
-- `CLI` golden fixtures: text byte-identical (except correctness fixes), JSON updated to `API` spec.
-- Stable output order tests.
+- Solver-boundary tests for impossible `DDS` counts, indices, scores, and poisoned-lock handling without panics.
+- Typed response `DTO` round trips and equality tests.
+- `CLI` golden fixtures: text byte-identical except approved correctness fixes; JSON uses the final API response `DTO`s.
+- Stable output-order and equivalent-card expansion/deduplication tests independent of raw `DDS` order.
+- Architectural checks: one public `PBN` record parser, no direct `DdsSolver` calls from the `CLI`, no `axum` imports in `application`, `input`, or transport `DTO` code, and no `serde_json::Value` in application or response types.
 
 Manual:
 
 - Run full-deal, residual, mid-trick, and play-trace `CLI` examples.
 - Verify corrected mid-trick scores.
+- Verify existing matrix calls containing `[First]` or `--first` remain accepted.
+- Verify prefixed, unprefixed, empty, and standard-section play inputs.
 - Verify `CLI --format json` matches documented `API` response shapes.
+
+`Phase 2b` may begin only after the full verification passes, project documents are current, the working tree is clean, and the developer explicitly confirms the `Phase 2a` result.
 
 ---
 
@@ -850,7 +984,7 @@ Manual:
 
 - `[[bin]] name = "bridge-server"` in `Cargo.toml`.
 - `src/server/main.rs` with `axum` `Router`, four `endpoint`s.
-- `DDS` initialized once at startup.
+- Call application-level `initialize_solver()` once at startup.
 
 ### Task 3: Add Bounded-Queue Worker
 
