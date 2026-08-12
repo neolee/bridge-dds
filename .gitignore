@@ -25,3 +25,7 @@ local
 db
 ref
 dump.txt
+
+.crush
+.reasonix
+reasonix.toml
